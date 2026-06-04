@@ -1,0 +1,50 @@
+appId: com.agegr.piwebdesktop
+productName: pi-web
+copyright: Copyright © 2026
+
+directories:
+  output: dist
+  buildResources: build
+
+# Only the Electron shell goes into the asar. The bundled Node runtime and the
+# pi-web runtime seed are shipped UNPACKED as extraResources (Node can't run
+# from inside an asar; the seed is copied to a writable user dir on first run).
+files:
+  - electron/**/*
+  - package.json
+
+extraResources:
+  # Bundled Node.js runtime (node.exe + npm) -> resources/node
+  - from: vendor/node
+    to: node
+  # pi-web runtime seed (npm prod install of @agegr/pi-web) -> resources/runtime-seed
+  - from: runtime-seed
+    to: runtime-seed
+    filter:
+      - "**/*"
+      - "!**/*.map"
+      - "!**/.cache/**"
+
+win:
+  target:
+    - nsis
+  icon: build/icon.ico
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+mac:
+  target:
+    - dmg
+  icon: build/icon.icns
+  category: public.app-category.developer-tools
+
+linux:
+  target:
+    - AppImage
+  icon: build/icon.png
+  category: Development

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>pi-web — 启动失败</title>
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #0b0b0c;
+        color: #e7e7ea;
+        font-family: -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      }
+      .wrap { max-width: 720px; margin: 0 auto; padding: 48px 32px; }
+      h1 { font-size: 18px; color: #ff7a7a; }
+      p { font-size: 13.5px; line-height: 1.6; color: #c7c7cf; }
+      pre {
+        background: #151517; border: 1px solid #2a2a2e; border-radius: 8px;
+        padding: 14px; font-size: 12px; color: #b9b9c2; overflow: auto;
+        white-space: pre-wrap; word-break: break-word; max-height: 360px;
+      }
+      code { color: #9a9af5; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>pi-web 启动失败</h1>
+      <p>本地服务未能正常启动。常见原因：未安装 Node.js，或 pi-web 尚未构建（运行 <code>npm run setup</code>）。</p>
+      <p id="msg"></p>
+      <pre id="log"></pre>
+    </div>
+    <script>
+      window.__setError = function (msg, log) {
+        document.getElementById("msg").textContent = "错误：" + (msg || "未知错误");
+        document.getElementById("log").textContent = log || "(无日志输出)";
+      };
+    </script>
+  </body>
+</html>

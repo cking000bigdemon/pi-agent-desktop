@@ -1,0 +1,17 @@
+# Electron wrapper
+node_modules/
+dist/
+
+# Build inputs that are regenerated (see README):
+#  - vendor/node  : bundled Node.js runtime (downloaded)
+#  - runtime-seed : npm prod install of @agegr/pi-web
+vendor/
+runtime-seed/
+
+# Legacy v1 source clone (no longer used at runtime)
+pi-web/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

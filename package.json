@@ -1,0 +1,18 @@
+{
+  "name": "pi-web-desktop",
+  "version": "0.1.0",
+  "description": "Standalone desktop application wrapping pi-web (Electron). Bundles the pi-web Next.js server and a Chromium window into a single app.",
+  "license": "MIT",
+  "author": "",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "seed": "cd runtime-seed && npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com",
+    "dist": "electron-builder",
+    "dist:dir": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}
