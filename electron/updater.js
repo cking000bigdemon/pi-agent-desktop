@@ -16,10 +16,28 @@ const path = require("path");
 const fs = require("fs");
 
 const PKG = "@agegr/pi-web";
+// Bundled inside @agegr/pi-web; surfaced in the update CTA so the result names
+// both packages the user cares about.
+const AGENT_PKG = "@earendil-works/pi-coding-agent";
 
 function getInstalledVersion(runtimeDir) {
   try {
     const p = path.join(runtimeDir, "node_modules", "@agegr", "pi-web", "package.json");
+    return JSON.parse(fs.readFileSync(p, "utf8")).version;
+  } catch {
+    return null;
+  }
+}
+
+function getInstalledAgentVersion(runtimeDir) {
+  try {
+    const p = path.join(
+      runtimeDir,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "package.json"
+    );
     return JSON.parse(fs.readFileSync(p, "utf8")).version;
   } catch {
     return null;
@@ -89,4 +107,12 @@ function isNewer(latest, installed) {
   return false;
 }
 
-module.exports = { PKG, getInstalledVersion, getLatestVersion, installLatest, isNewer };
+module.exports = {
+  PKG,
+  AGENT_PKG,
+  getInstalledVersion,
+  getInstalledAgentVersion,
+  getLatestVersion,
+  installLatest,
+  isNewer,
+};

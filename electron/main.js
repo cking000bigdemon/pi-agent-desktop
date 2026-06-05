@@ -17,7 +17,7 @@
  *    127.0.0.1 port and shown in a native window.
  */
 
-const { app, BrowserWindow, Menu, shell, dialog } = require("electron");
+const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -293,9 +293,42 @@ async function startOrRestartServer() {
 }
 
 // ---------------------------------------------------------------------------
+// Update-result CTA (in-page, top-right corner)
+// ---------------------------------------------------------------------------
+// Because pi-web is not forked, the desktop shell surfaces the outcome of every
+// update check as an overlay injected by preload.js. The main process only has
+// to hand the renderer a small notice object; delivery is timing-aware because
+// a successful update reloads the embedded server (and thus the page) before we
+// can report it.
+let pendingNotice = null;
+
+/** Send the queued CTA to the renderer once a pi-web page is present. */
+function flushUpdateNotice() {
+  if (!pendingNotice || !win || win.isDestroyed()) return;
+  try {
+    win.webContents.send("pi-web-desktop:update-notice", pendingNotice);
+    pendingNotice = null;
+  } catch {
+    /* not ready yet — did-finish-load will retry */
+  }
+}
+
+/**
+ * Queue an update-result CTA. Delivered immediately if the page is idle; if a
+ * navigation is in flight (e.g. the post-update reload) it is held until the
+ * did-finish-load handler flushes it.
+ */
+function notifyUpdate(notice) {
+  pendingNotice = notice;
+  if (win && !win.isDestroyed() && !win.webContents.isLoading()) flushUpdateNotice();
+}
+
+// ---------------------------------------------------------------------------
 // Updates
 // ---------------------------------------------------------------------------
 let updating = false;
+let lastKnownLatest = null;
+
 async function checkForUpdates(interactive) {
   if (updating) return;
   const ctx = updaterCtx();
@@ -308,32 +341,57 @@ async function checkForUpdates(interactive) {
     if (interactive) {
       dialog.showErrorBox("检查更新失败", String((e && e.stderr) || (e && e.message) || e).slice(-1500));
     }
+    notifyUpdate({
+      status: "error",
+      title: "检查更新失败",
+      message: "无法获取最新版本信息",
+      detail: "请检查网络连接后重试。",
+    });
     return;
   }
+  lastKnownLatest = latest;
 
   if (!updater.isNewer(latest, installed)) {
-    if (interactive) {
-      dialog.showMessageBox(win, {
-        type: "info",
-        title: "检查更新",
-        message: "已是最新版本",
-        detail: `当前 pi-web 版本：${installed || "未知"}`,
-      });
-    }
+    const agentV = updater.getInstalledAgentVersion(runtimeDir());
+    notifyUpdate({
+      status: "latest",
+      title: "已是最新版本",
+      message: `pi-web ${installed || "未知"}`,
+      detail: agentV ? `pi-coding-agent ${agentV} · 无需更新` : "无需更新",
+    });
     return;
   }
 
-  const choice = dialog.showMessageBoxSync(win, {
-    type: "question",
-    buttons: ["更新并重启", "以后再说"],
-    defaultId: 0,
-    cancelId: 1,
-    title: "发现新版本",
-    message: `发现 pi-web 新版本 ${latest}`,
-    detail: `当前 ${installed || "未知"} → 最新 ${latest}\n\n将下载并自动重启内嵌服务（含 pi-coding-agent）。`,
-  });
-  if (choice !== 0) return;
+  // A newer version exists. The boot-time auto check updates silently; a manual
+  // "检查更新…" asks first so the user controls the restart.
+  if (interactive) {
+    const choice = dialog.showMessageBoxSync(win, {
+      type: "question",
+      buttons: ["更新并重启", "以后再说"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "发现新版本",
+      message: `发现 pi-web 新版本 ${latest}`,
+      detail: `当前 ${installed || "未知"} → 最新 ${latest}\n\n将下载并自动重启内嵌服务（含 pi-coding-agent）。`,
+    });
+    if (choice !== 0) {
+      // Deferred — leave an actionable CTA the user can trigger later.
+      notifyUpdate({
+        status: "available",
+        title: "发现新版本",
+        message: `pi-web ${latest} 可更新`,
+        detail: `当前 ${installed || "未知"} → ${latest}`,
+        action: { id: "apply-update", label: "更新并重启" },
+      });
+      return;
+    }
+  }
 
+  await applyUpdate(ctx, installed, latest, interactive);
+}
+
+async function applyUpdate(ctx, installed, latest, interactive) {
+  if (updating) return;
   updating = true;
   try {
     if (win) await win.loadFile(path.join(__dirname, "updating.html")).catch(() => {});
@@ -342,21 +400,41 @@ async function checkForUpdates(interactive) {
     await updater.installLatest(ctx);
     await startOrRestartServer();
     const v = updater.getInstalledVersion(runtimeDir());
-    if (interactive) {
-      dialog.showMessageBox(win, { type: "info", title: "更新完成", message: "pi-web 已更新", detail: `当前版本：${v}` });
-    }
+    const agentV = updater.getInstalledAgentVersion(runtimeDir());
+    notifyUpdate({
+      status: "updated",
+      title: "更新完成",
+      message: `pi-web 已更新到 ${v || latest}`,
+      detail: `${installed || "未知"} → ${v || latest}${agentV ? ` · pi-coding-agent ${agentV}` : ""}`,
+    });
   } catch (e) {
-    dialog.showErrorBox("更新失败", String((e && e.stderr) || (e && e.message) || e).slice(-2000));
-    // Recover: bring the (old) server back up.
+    if (interactive) {
+      dialog.showErrorBox("更新失败", String((e && e.stderr) || (e && e.message) || e).slice(-2000));
+    }
+    // Recover: bring the (old) server back up, then report on the reloaded page.
     try {
       await startOrRestartServer();
     } catch {
       /* ignore */
     }
+    notifyUpdate({
+      status: "error",
+      title: "更新失败",
+      message: "自动更新未完成，已恢复当前版本",
+      detail: "可稍后通过菜单「检查更新…」重试。",
+    });
   } finally {
     updating = false;
   }
 }
+
+// CTA action: user clicked "更新并重启" on a deferred-update notice.
+ipcMain.on("pi-web-desktop:apply-update", () => {
+  if (updating) return;
+  const ctx = updaterCtx();
+  const installed = updater.getInstalledVersion(runtimeDir());
+  applyUpdate(ctx, installed, lastKnownLatest, true).catch(() => {});
+});
 
 // ---------------------------------------------------------------------------
 // Window + lifecycle
@@ -393,6 +471,9 @@ function createWindow() {
     const cur = win && win.webContents.getURL();
     if (serverUrl && cur && cur.startsWith(serverUrl)) {
       console.log("[pi-web-desktop] window did-finish-load: pi-web UI rendered");
+      // Deliver any update-result CTA queued while the page was (re)loading —
+      // e.g. the "更新完成" notice set right after an update reloads the server.
+      flushUpdateNotice();
     }
   });
 
