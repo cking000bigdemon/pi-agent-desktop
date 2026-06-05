@@ -255,7 +255,7 @@ function startServer(port) {
     // unexpected crash should alarm the user.
     if (!app.isQuitting && !restarting && !stoppingForUpdate) {
       dialog.showErrorBox(
-        "pi-web 服务已停止",
+        "Pi Agent 服务已停止",
         `内嵌服务意外退出 (code=${code}, signal=${signal})。\n\n最近输出:\n${serverLog.slice(-2000)}`
       );
     }
@@ -458,7 +458,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: "#0b0b0c",
     autoHideMenuBar: true,
-    title: "pi-web",
+    title: "Pi Agent",
     icon: path.join(__dirname, "..", "build", "icon.png"),
     webPreferences: {
       contextIsolation: true,
@@ -469,6 +469,11 @@ function createWindow() {
   });
 
   win.loadFile(path.join(__dirname, "loading.html"));
+
+  // Keep the native window/taskbar title as the app name. The embedded pi-web
+  // page sets its own <title> ("Pi Agent Web"); we don't let that propagate to
+  // the OS window so the shell consistently presents as "Pi Agent".
+  win.on("page-title-updated", (e) => e.preventDefault());
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("http://127.0.0.1") || url.startsWith("http://localhost")) {
