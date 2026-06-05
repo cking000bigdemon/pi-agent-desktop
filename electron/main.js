@@ -250,7 +250,10 @@ function startServer(port) {
   serverProc.on("error", (e) => dbg(`server spawn ERROR ${e && e.message}`));
   serverProc.on("exit", (code, signal) => {
     dbg(`server exit code=${code} signal=${signal}`);
-    if (!app.isQuitting && !restarting) {
+    // Suppress the error popup for INTENTIONAL stops: app quit, a restart, or an
+    // update that kills the old server before reinstalling. Only a genuinely
+    // unexpected crash should alarm the user.
+    if (!app.isQuitting && !restarting && !stoppingForUpdate) {
       dialog.showErrorBox(
         "pi-web 服务已停止",
         `内嵌服务意外退出 (code=${code}, signal=${signal})。\n\n最近输出:\n${serverLog.slice(-2000)}`
@@ -279,6 +282,9 @@ function killServer() {
 }
 
 let restarting = false;
+// True while applyUpdate has intentionally stopped the server to reinstall, so
+// the server-exit handler doesn't mistake the deliberate kill for a crash.
+let stoppingForUpdate = false;
 async function startOrRestartServer() {
   restarting = true;
   killServer();
@@ -393,11 +399,15 @@ async function checkForUpdates(interactive) {
 async function applyUpdate(ctx, installed, latest, interactive) {
   if (updating) return;
   updating = true;
+  stoppingForUpdate = true; // deliberate stop below — don't show the crash popup
   try {
     if (win) await win.loadFile(path.join(__dirname, "updating.html")).catch(() => {});
     killServer();
     await new Promise((r) => setTimeout(r, 600));
     await updater.installLatest(ctx);
+    // Install done; the new server is brought up via startOrRestartServer, whose
+    // own `restarting` guard covers its lifecycle from here on.
+    stoppingForUpdate = false;
     await startOrRestartServer();
     const v = updater.getInstalledVersion(runtimeDir());
     const agentV = updater.getInstalledAgentVersion(runtimeDir());
@@ -425,6 +435,7 @@ async function applyUpdate(ctx, installed, latest, interactive) {
     });
   } finally {
     updating = false;
+    stoppingForUpdate = false;
   }
 }
 
