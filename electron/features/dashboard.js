@@ -202,14 +202,111 @@ function fileExists(p) {
 }
 
 // ---------------------------------------------------------------------------
+// Token usage (since this app launch)
+// ---------------------------------------------------------------------------
+// pi stores sessions as JSONL under ~/.pi/agent/sessions/--<cwd>--/*.jsonl. Each
+// assistant message line carries `message.usage` (see docs/session-format.md):
+//   { input, output, cacheRead, cacheWrite, totalTokens, cost }
+// "Total consumption since launch" = sum of `totalTokens` over every assistant
+// message whose timestamp is >= the app's boot time, across ALL sessions. Each
+// LLM call re-sends the growing context as input, so summing per-call totals is
+// exactly the tokens actually consumed/billed this run (not the context size).
+function num(v) {
+  return typeof v === "number" && isFinite(v) ? v : 0;
+}
+
+function collectJsonl(dir, out, depth) {
+  if (depth > 4) return;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) collectJsonl(full, out, depth + 1);
+    else if (e.isFile() && e.name.endsWith(".jsonl")) out.push(full);
+  }
+}
+
+function readTokenUsage(sessionsDir, sinceMs) {
+  let total = 0;
+  let input = 0;
+  let output = 0;
+  let calls = 0;
+  const sessions = new Set();
+
+  const files = [];
+  collectJsonl(sessionsDir, files, 0);
+
+  for (const file of files) {
+    // A file untouched since boot can't hold post-boot turns — skip the read.
+    if (sinceMs) {
+      let mtime = 0;
+      try {
+        mtime = fs.statSync(file).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (mtime < sinceMs) continue;
+    }
+
+    let text;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+
+    let counted = false;
+    for (const line of text.split("\n")) {
+      // Cheap prefilter: only assistant lines carry a usage block.
+      if (!line || line.indexOf('"usage"') === -1) continue;
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const m = entry && entry.message;
+      if (!m || m.role !== "assistant" || !m.usage) continue;
+      const ts =
+        typeof m.timestamp === "number" ? m.timestamp : Date.parse(entry.timestamp || "") || 0;
+      if (sinceMs && !(ts >= sinceMs)) continue;
+      const u = m.usage;
+      const tt =
+        u.totalTokens != null
+          ? num(u.totalTokens)
+          : num(u.input) + num(u.output) + num(u.cacheRead) + num(u.cacheWrite);
+      total += tt;
+      input += num(u.input) + num(u.cacheRead) + num(u.cacheWrite);
+      output += num(u.output);
+      calls += 1;
+      counted = true;
+    }
+    if (counted) sessions.add(file);
+  }
+
+  return { total, input, output, calls, sessions: sessions.size, sinceMs: sinceMs || 0 };
+}
+
+// ---------------------------------------------------------------------------
 // Public
 // ---------------------------------------------------------------------------
-/** Read the full dashboard status. Never throws — partial data + error string. */
-function readStatus() {
+/**
+ * Read the full dashboard status. Never throws — partial data + error string.
+ * @param {{ sinceMs?: number }} [opts] sinceMs = only count token usage from
+ *   assistant turns at/after this epoch ms (the app boot time). 0/omitted = all.
+ */
+function readStatus(opts) {
+  opts = opts || {};
   const { agentDir, mcpConfigPath, extensionsDir, settingsPath } = paths();
+  const sessionsDir = path.join(agentDir, "sessions");
   let error;
   let mcp = { active: [], inactive: [] };
   let extensions = { active: [], inactive: [] };
+  let tokens = { total: 0, input: 0, output: 0, calls: 0, sessions: 0, sinceMs: opts.sinceMs || 0 };
   try {
     mcp = readMcp(mcpConfigPath);
   } catch (e) {
@@ -220,10 +317,16 @@ function readStatus() {
   } catch (e) {
     error = (error ? error + "; " : "") + `扩展读取失败: ${(e && e.message) || e}`;
   }
+  try {
+    tokens = readTokenUsage(sessionsDir, opts.sinceMs || 0);
+  } catch (e) {
+    error = (error ? error + "; " : "") + `token 统计失败: ${(e && e.message) || e}`;
+  }
   return {
     mcp,
     extensions,
-    source: { agentDir, mcpConfigPath, extensionsDir },
+    tokens,
+    source: { agentDir, mcpConfigPath, extensionsDir, sessionsDir },
     error,
   };
 }

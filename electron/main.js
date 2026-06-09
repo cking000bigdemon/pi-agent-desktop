@@ -29,6 +29,10 @@ const dashboard = require("./features/dashboard");
 const isWindows = process.platform === "win32";
 const REGISTRY = process.env.PI_WEB_REGISTRY || "https://registry.npmmirror.com";
 const AUTO_CHECK = process.env.PI_WEB_AUTO_UPDATE_CHECK !== "0";
+// When this app launch began (epoch ms). Captured at main-process load so it
+// survives embedded-server restarts; the dashboard counts token usage from
+// session turns at/after this moment ("since this pi-agent was opened").
+const APP_BOOT_MS = Date.now();
 
 const os = require("os");
 const DEBUG_LOG = path.join(os.tmpdir(), "pi-web-desktop-debug.log");
@@ -456,12 +460,13 @@ ipcMain.on("pi-web-desktop:apply-update", () => {
 // MCP servers and extensions. Never throws — returns a partial result + error.
 ipcMain.handle("pi-web-desktop:dashboard-status", () => {
   try {
-    return dashboard.readStatus();
+    return dashboard.readStatus({ sinceMs: APP_BOOT_MS });
   } catch (e) {
     dbg(`dashboard-status error ${(e && e.message) || e}`);
     return {
       mcp: { active: [], inactive: [] },
       extensions: { active: [], inactive: [] },
+      tokens: { total: 0, input: 0, output: 0, calls: 0, sessions: 0 },
       error: String((e && e.message) || e),
     };
   }

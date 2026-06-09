@@ -235,6 +235,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
   const GREEN = "#16a34a"; // 已激活
   const RED = "#dc2626"; //  暂未激活
   const REFRESH_MS = 20000;
+  const BAR_H = 30; // bar height (px); kept in sync with the reserved space
 
   let host = null;
   let bar = null;
@@ -264,17 +265,66 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     if (host && document.body && document.body.contains(host)) return host;
     host = document.createElement("div");
     host.id = "pi-web-desktop-dashboard-host";
+    // Fixed strip pinned to the viewport bottom — reliable placement regardless
+    // of pi-web's (client-rendered) layout. The page itself is shrunk by BAR_H
+    // (see setupReserve) so this strip never covers pi-web's bottom toolbar.
     const s = host.style;
     s.position = "fixed";
     s.left = "0";
     s.right = "0";
     s.bottom = "0";
+    s.height = BAR_H + "px";
     s.zIndex = "2147483600"; // below the update toast (max), above pi-web
-    s.pointerEvents = "none"; // strip is non-interactive; children opt back in
+    s.pointerEvents = "none"; // chips re-enable; the rest stays click-through
     host.attachShadow({ mode: "open" });
     document.body.appendChild(host);
     buildBar();
     return host;
+  }
+
+  // Reserve BAR_H at the bottom of the page so the fixed bar doesn't overlap
+  // pi-web's own bottom input toolbar. pi-web's app pane is the <body> child
+  // carrying inline `height:100dvh`; we tag it with a data-attr we own and a
+  // stylesheet shrinks it by BAR_H. !important beats React's inline height, and
+  // because we never mutate a React-managed style, re-renders can't undo it.
+  function ensureReserveStyle() {
+    if (document.getElementById("pi-web-desktop-reserve-style")) return;
+    const st = document.createElement("style");
+    st.id = "pi-web-desktop-reserve-style";
+    st.textContent =
+      "[data-piwd-reserve]{height:calc(100dvh - " +
+      BAR_H +
+      "px) !important;max-height:calc(100dvh - " +
+      BAR_H +
+      "px) !important;}";
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  function tagAppRoot() {
+    const kids = (document.body && document.body.children) || [];
+    for (let i = 0; i < kids.length; i++) {
+      const el = kids[i];
+      if (el === host || el.id === "pi-web-desktop-cta-host" || el.id === "pi-web-desktop-dashboard-host") {
+        continue;
+      }
+      if (el.tagName === "DIV" && el.style && el.style.height === "100dvh") {
+        if (!el.hasAttribute("data-piwd-reserve")) el.setAttribute("data-piwd-reserve", "1");
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function setupReserve() {
+    ensureReserveStyle();
+    tagAppRoot();
+    // pi-web renders client-side, so the app pane mounts after DOMContentLoaded
+    // (and may remount on route change). Watch for it and (re)tag it.
+    try {
+      new MutationObserver(() => tagAppRoot()).observe(document.body, { childList: true });
+    } catch {
+      /* ignore */
+    }
   }
 
   // --- the bottom bar ---
@@ -294,17 +344,54 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     bs.fontFamily = MONO;
     bs.fontSize = "12px";
     bs.color = "var(--text-muted, #6b7280)";
-    bs.background =
-      "color-mix(in srgb, var(--bg, #ffffff) 86%, transparent)";
+    bs.background = "var(--bg, #ffffff)";
     bs.borderTop = "1px solid var(--border, #e5e7eb)";
-    bs.backdropFilter = "blur(6px)";
-    bs.pointerEvents = "none"; // pass clicks through the empty stretch
+    bs.pointerEvents = "none"; // only the chips are interactive (set below)
 
+    bar.appendChild(buildTotalChip());
+    bar.appendChild(buildSep());
     bar.appendChild(buildChip("mcp", "MCP"));
     bar.appendChild(buildSep());
     bar.appendChild(buildChip("extensions", "Extensions"));
 
     root.appendChild(bar);
+  }
+
+  // Compact token formatter: 300000 -> "300k", 2904 -> "2.9k", 1.5e6 -> "1.5M".
+  function formatTokens(t) {
+    t = Number(t) || 0;
+    if (t >= 1e6) return (t / 1e6).toFixed(t >= 1e7 ? 0 : 1).replace(/\.0$/, "") + "M";
+    if (t >= 1e4) return Math.round(t / 1e3) + "k";
+    if (t >= 1e3) return (t / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+    return String(Math.round(t));
+  }
+
+  // Display-only "Total <n>" chip (no popover) — total tokens consumed since the
+  // app launched. Hover shows the input/output/call breakdown.
+  function buildTotalChip() {
+    const chip = document.createElement("div");
+    const cs = chip.style;
+    cs.pointerEvents = "auto";
+    cs.display = "flex";
+    cs.alignItems = "center";
+    cs.gap = "6px";
+    cs.padding = "5px 8px";
+    cs.fontFamily = MONO;
+    cs.fontSize = "12px";
+    cs.color = "var(--text, #1a1a1a)";
+
+    const label = document.createElement("span");
+    label.textContent = "Total";
+    label.style.color = "var(--text-muted, #6b7280)";
+
+    const val = document.createElement("span");
+    val.textContent = "–";
+    val.style.fontWeight = "600";
+
+    chip.appendChild(label);
+    chip.appendChild(val);
+    chips.total = { el: chip, val };
+    return chip;
   }
 
   function buildSep() {
@@ -389,6 +476,16 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
       const n = counts(cat);
       c.active.textContent = String(n.active);
       c.inactive.textContent = String(n.inactive);
+    }
+    if (chips.total) {
+      const t = (status && status.tokens) || null;
+      const total = t ? t.total : 0;
+      chips.total.val.textContent = formatTokens(total);
+      chips.total.el.title = t
+        ? `自本次启动消耗 ${total.toLocaleString()} tokens\n` +
+          `输入 ${(t.input || 0).toLocaleString()} · 输出 ${(t.output || 0).toLocaleString()} · ` +
+          `${t.calls || 0} 次调用 / ${t.sessions || 0} 个会话`
+        : "本次启动 token 消耗";
     }
   }
 
@@ -615,6 +712,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 
   function init() {
     ensureHost();
+    setupReserve();
     refresh();
     // Keep counts fresh (cheap file reads); also refresh when the window regains
     // focus so config edits show up without a restart.
