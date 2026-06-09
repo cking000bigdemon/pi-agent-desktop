@@ -24,6 +24,7 @@ const fs = require("fs");
 const net = require("net");
 const http = require("http");
 const updater = require("./updater");
+const dashboard = require("./features/dashboard");
 
 const isWindows = process.platform === "win32";
 const REGISTRY = process.env.PI_WEB_REGISTRY || "https://registry.npmmirror.com";
@@ -445,6 +446,25 @@ ipcMain.on("pi-web-desktop:apply-update", () => {
   const ctx = updaterCtx();
   const installed = updater.getInstalledVersion(runtimeDir());
   applyUpdate(ctx, installed, lastKnownLatest, true).catch(() => {});
+});
+
+// ---------------------------------------------------------------------------
+// Dashboard (MCP / extensions activation status)
+// ---------------------------------------------------------------------------
+// Backend for the bottom dashboard bar injected by preload.js. Reads ~/.pi
+// config directly (see features/dashboard.js) and reports active/inactive
+// MCP servers and extensions. Never throws — returns a partial result + error.
+ipcMain.handle("pi-web-desktop:dashboard-status", () => {
+  try {
+    return dashboard.readStatus();
+  } catch (e) {
+    dbg(`dashboard-status error ${(e && e.message) || e}`);
+    return {
+      mcp: { active: [], inactive: [] },
+      extensions: { active: [], inactive: [] },
+      error: String((e && e.message) || e),
+    };
+  }
 });
 
 // ---------------------------------------------------------------------------
