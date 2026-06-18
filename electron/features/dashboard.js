@@ -24,6 +24,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const subagents = require("./subagents");
 
 function homeDir() {
   return os.homedir();
@@ -184,8 +185,63 @@ function readExtensions(extensionsDir, settingsPath) {
     active.push({ name: extNameFromPath(abs, kind), kind, source: "settings" });
   }
 
+  // settings.json `packages: [...]` — pi packages installed via `pi install`
+  // (npm/git), recorded here and unpacked under <agentDir>/npm/node_modules/.
+  // Each declares the extensions it contributes in its package.json `pi.extensions`
+  // (see docs/packages.md). pi loads these on startup just like local extensions,
+  // so list one entry per package that contributes at least one extension. This is
+  // a separate source from `extensions/` and `settings.extensions` — without it,
+  // `pi install`ed extensions never show in the dashboard.
+  const agentDir = path.dirname(settingsPath);
+  const npmModulesDir = path.join(agentDir, "npm", "node_modules");
+  const pkgs = settings && Array.isArray(settings.packages) ? settings.packages : [];
+  for (const spec of pkgs) {
+    if (typeof spec !== "string" || !spec.trim()) continue;
+    const name = pkgNameFromSpec(spec);
+    if (!name) continue;
+    const scheme = (spec.match(/^([a-z]+):/i) || [])[1] || "npm";
+    const pkgDir = path.join(npmModulesDir, name);
+    const pj = readJson(path.join(pkgDir, "package.json"));
+    const declared = pj && pj.pi && Array.isArray(pj.pi.extensions) ? pj.pi.extensions : [];
+    if (declared.length === 0) continue; // skills/prompts-only package — not an extension
+    const resolvesAny = declared.some((rel) => {
+      if (typeof rel !== "string") return false;
+      const ep = path.resolve(pkgDir, rel);
+      return fileExists(ep) || fileExists(path.join(ep, "index.ts"));
+    });
+    if (resolvesAny) active.push({ name, kind: "package", source: scheme.toLowerCase() });
+    else inactive.push({ name, kind: "package", source: scheme.toLowerCase(), reason: "not-installed" });
+  }
+
   const sort = (a, b) => a.name.localeCompare(b.name);
   return { active: active.sort(sort), inactive: inactive.sort(sort) };
+}
+
+// Extract the installed package directory name from a settings `packages` spec:
+//   "npm:pi-subagents"            -> "pi-subagents"
+//   "npm:pi-subagents@0.28.0"     -> "pi-subagents"
+//   "npm:@scope/pkg@1.2.3"        -> "@scope/pkg"
+//   "git:github.com/u/repo@v1"    -> "repo" (best effort)
+//   "pi-subagents"                -> "pi-subagents"
+function pkgNameFromSpec(spec) {
+  let s = String(spec).trim();
+  const m = s.match(/^(npm|git|github|gh|file):(.*)$/i);
+  let scheme = "";
+  if (m) {
+    scheme = m[1].toLowerCase();
+    s = m[2];
+  }
+  if (scheme === "git" || scheme === "github" || scheme === "gh" || scheme === "file") {
+    s = s.replace(/#.*$/, "").replace(/@[^/@]+$/, "");
+    s = (s.split(/[\/\\]/).filter(Boolean).pop() || "").replace(/\.git$/i, "");
+    return s;
+  }
+  if (s.startsWith("@")) {
+    const at2 = s.indexOf("@", 1);
+    return at2 === -1 ? s : s.slice(0, at2);
+  }
+  const at = s.indexOf("@");
+  return at === -1 ? s : s.slice(0, at);
 }
 
 function extNameFromPath(p, kind) {
@@ -296,10 +352,13 @@ function readTokenUsage(sessionsDir, sinceMs) {
 // ---------------------------------------------------------------------------
 /**
  * Read the full dashboard status. Never throws — partial data + error string.
- * @param {{ sinceMs?: number }} [opts] sinceMs = only count token usage from
- *   assistant turns at/after this epoch ms (the app boot time). 0/omitted = all.
+ * Async because the subagent section probes the OS process table.
+ * @param {{ sinceMs?: number, serverPid?: number }} [opts]
+ *   sinceMs = only count token usage / "done this session" from turns at/after
+ *   this epoch ms (the app boot time); 0/omitted = all. serverPid = pid of the
+ *   pi-web server, so subagent counting is scoped to THIS app's children.
  */
-function readStatus(opts) {
+async function readStatus(opts) {
   opts = opts || {};
   const { agentDir, mcpConfigPath, extensionsDir, settingsPath } = paths();
   const sessionsDir = path.join(agentDir, "sessions");
@@ -307,6 +366,7 @@ function readStatus(opts) {
   let mcp = { active: [], inactive: [] };
   let extensions = { active: [], inactive: [] };
   let tokens = { total: 0, input: 0, output: 0, calls: 0, sessions: 0, sinceMs: opts.sinceMs || 0 };
+  let subs = { running: 0, runningList: [], doneSession: 0, failedSession: 0, recent: [] };
   try {
     mcp = readMcp(mcpConfigPath);
   } catch (e) {
@@ -322,10 +382,17 @@ function readStatus(opts) {
   } catch (e) {
     error = (error ? error + "; " : "") + `token 统计失败: ${(e && e.message) || e}`;
   }
+  try {
+    subs = await subagents.readSubagents({ serverPid: opts.serverPid, sinceMs: opts.sinceMs || 0 });
+    if (subs.error) error = (error ? error + "; " : "") + subs.error;
+  } catch (e) {
+    error = (error ? error + "; " : "") + `子会话统计失败: ${(e && e.message) || e}`;
+  }
   return {
     mcp,
     extensions,
     tokens,
+    subagents: subs,
     source: { agentDir, mcpConfigPath, extensionsDir, sessionsDir },
     error,
   };

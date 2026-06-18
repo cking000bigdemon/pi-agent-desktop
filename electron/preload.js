@@ -232,9 +232,11 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
   // shell's own file:// pages (loading/updating/error).
   if (location.protocol !== "http:") return;
 
-  const GREEN = "#16a34a"; // 已激活
-  const RED = "#dc2626"; //  暂未激活
-  const REFRESH_MS = 20000;
+  const GREEN = "#16a34a"; // 已激活 / 运行中
+  const RED = "#dc2626"; //  暂未激活 / 失败
+  const GRAY = "var(--text-dim, #9ca3af)"; // 本次会话已完成（中性）
+  const REFRESH_MS = 20000; // idle cadence
+  const REFRESH_ACTIVE_MS = 3000; // faster cadence while subagents are running
   const BAR_H = 30; // bar height (px); kept in sync with the reserved space
 
   let host = null;
@@ -353,6 +355,8 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     bar.appendChild(buildChip("mcp", "MCP"));
     bar.appendChild(buildSep());
     bar.appendChild(buildChip("extensions", "Extensions"));
+    bar.appendChild(buildSep());
+    bar.appendChild(buildSubagentChip());
 
     root.appendChild(bar);
   }
@@ -461,6 +465,70 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     return chip;
   }
 
+  // Sub-agents chip: how many child pi sessions are running right now (green)
+  // and how many finished during this app session (gray). Same shape/behaviour
+  // as buildChip, but its two numbers are running/done rather than active/
+  // inactive, and clicking opens a bespoke popover (see renderSubagentPopover).
+  function buildSubagentChip() {
+    const category = "subagents";
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.setAttribute("aria-label", "子会话（sub-agent）运行状态");
+    const cs = chip.style;
+    cs.pointerEvents = "auto";
+    cs.display = "flex";
+    cs.alignItems = "center";
+    cs.gap = "6px";
+    cs.cursor = "pointer";
+    cs.border = "none";
+    cs.background = "transparent";
+    cs.color = "var(--text, #1a1a1a)";
+    cs.fontFamily = MONO;
+    cs.fontSize = "12px";
+    cs.lineHeight = "1";
+    cs.padding = "5px 8px";
+    cs.borderRadius = "8px";
+    cs.transition = "background .15s ease";
+    chip.addEventListener(
+      "mouseenter",
+      () => (chip.style.background = "color-mix(in srgb, var(--text, #1a1a1a) 8%, transparent)")
+    );
+    chip.addEventListener("mouseleave", () => {
+      if (openCategory !== category) chip.style.background = "transparent";
+    });
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePopover(category);
+    });
+
+    const name = document.createElement("span");
+    name.textContent = "Sub-agents";
+    name.style.color = "var(--text-muted, #6b7280)";
+    name.style.marginRight = "2px";
+
+    // green dot: full opacity while something runs, dimmed when idle (set in
+    // updateChips) so a live session genuinely stands out.
+    const runDot = dot(GREEN);
+    const running = document.createElement("span");
+    running.textContent = "–";
+    running.style.color = GREEN;
+    running.style.fontWeight = "600";
+
+    const done = document.createElement("span");
+    done.textContent = "–";
+    done.style.color = GRAY;
+    done.style.fontWeight = "600";
+
+    chip.appendChild(name);
+    chip.appendChild(runDot);
+    chip.appendChild(running);
+    chip.appendChild(dot(GRAY));
+    chip.appendChild(done);
+
+    chips[category] = { el: chip, runDot, running, done };
+    return chip;
+  }
+
   function counts(cat) {
     const group = status && status[cat];
     return {
@@ -487,6 +555,20 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
           `${t.calls || 0} 次调用 / ${t.sessions || 0} 个会话`
         : "本次启动 token 消耗";
     }
+    if (chips.subagents) {
+      const s = (status && status.subagents) || null;
+      const running = s ? s.running || 0 : 0;
+      const done = s ? s.doneSession || 0 : 0;
+      const failed = s ? s.failedSession || 0 : 0;
+      chips.subagents.running.textContent = String(running);
+      chips.subagents.done.textContent = String(done);
+      // Dim the green dot when idle so a running session genuinely stands out.
+      chips.subagents.runDot.style.opacity = running > 0 ? "1" : "0.35";
+      chips.subagents.el.title = s
+        ? `子会话（sub-agent）：${running} 个运行中\n` +
+          `本次启动已完成 ${done} 个${failed ? `，失败 ${failed} 个` : ""}`
+        : "子会话（sub-agent）运行状态";
+    }
   }
 
   // --- the bottom-right popover ---
@@ -500,7 +582,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 
   function openPopover(category) {
     openCategory = category;
-    for (const cat of ["mcp", "extensions"]) {
+    for (const cat of ["mcp", "extensions", "subagents"]) {
       if (chips[cat]) {
         chips[cat].el.style.background =
           cat === category ? "color-mix(in srgb, var(--text, #1a1a1a) 8%, transparent)" : "transparent";
@@ -515,7 +597,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 
   function closePopover() {
     openCategory = null;
-    for (const cat of ["mcp", "extensions"]) {
+    for (const cat of ["mcp", "extensions", "subagents"]) {
       if (chips[cat]) chips[cat].el.style.background = "transparent";
     }
     if (popover) {
@@ -559,7 +641,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     cs.transition = "opacity .18s ease, transform .18s ease";
 
     const data = (status && status[category]) || { active: [], inactive: [] };
-    const title = category === "mcp" ? "MCP" : "Extensions";
+    const title = category === "mcp" ? "MCP" : category === "subagents" ? "Sub-agents" : "Extensions";
 
     // header
     const head = document.createElement("div");
@@ -601,8 +683,12 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     head.appendChild(close);
     card.appendChild(head);
 
-    card.appendChild(buildSection("已激活", GREEN, data.active, category));
-    card.appendChild(buildSection("暂未激活", RED, data.inactive, category));
+    if (category === "subagents") {
+      appendSubagentSections(card);
+    } else {
+      card.appendChild(buildSection("已激活", GREEN, data.active, category));
+      card.appendChild(buildSection("暂未激活", RED, data.inactive, category));
+    }
 
     if (status && status.error) {
       const err = document.createElement("div");
@@ -677,6 +763,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     // a small muted tag: MCP transport type, or extension kind/source
     let tagText = "";
     if (category === "mcp") tagText = item.type || "";
+    else if (item.kind === "package") tagText = item.source || "pkg"; // npm / git package
     else if (item.source === "settings") tagText = "settings";
     else if (item.kind === "dir") tagText = "dir";
     if (tagText) {
@@ -699,6 +786,126 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     return row;
   }
 
+  // --- subagent popover body ---
+  function sectionHeading(label, color, count) {
+    const heading = document.createElement("div");
+    heading.style.display = "flex";
+    heading.style.alignItems = "center";
+    heading.style.gap = "6px";
+    heading.style.marginBottom = "6px";
+    const hl = document.createElement("span");
+    hl.textContent = label;
+    hl.style.color = color;
+    hl.style.fontWeight = "600";
+    hl.style.fontSize = "12px";
+    const cnt = document.createElement("span");
+    cnt.textContent = String(count);
+    cnt.style.color = "var(--text-muted, #6b7280)";
+    cnt.style.fontSize = "12px";
+    heading.appendChild(dot(color));
+    heading.appendChild(hl);
+    heading.appendChild(cnt);
+    return heading;
+  }
+
+  function emptyRow(text) {
+    const empty = document.createElement("div");
+    empty.textContent = text;
+    empty.style.color = "var(--text-dim, #9ca3af)";
+    empty.style.fontSize = "12px";
+    empty.style.paddingLeft = "13px";
+    return empty;
+  }
+
+  function fmtDuration(ms) {
+    if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "";
+    const s = Math.round(ms / 1000);
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return r ? `${m}m${r}s` : `${m}m`;
+  }
+
+  function subagentRow(o) {
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.alignItems = "baseline";
+    row.style.gap = "8px";
+    row.style.padding = "3px 0 3px 13px";
+
+    const name = document.createElement("span");
+    name.textContent = o.name || "(未命名)";
+    name.style.color = "var(--text, #1a1a1a)";
+    name.style.fontSize = "12.5px";
+    name.style.wordBreak = "break-all";
+    row.appendChild(name);
+
+    if (o.tag) {
+      const tag = document.createElement("span");
+      tag.textContent = o.tag;
+      tag.style.flex = "0 0 auto";
+      tag.style.marginLeft = "auto";
+      tag.style.fontSize = "10.5px";
+      tag.style.color = o.tagColor || "var(--text-dim, #9ca3af)";
+      tag.style.border = "1px solid var(--border, #e5e7eb)";
+      tag.style.borderRadius = "5px";
+      tag.style.padding = "0 5px";
+      row.appendChild(tag);
+    }
+    if (o.title) row.title = o.title;
+    return row;
+  }
+
+  // Two sections: live runs (green) + finished-this-session (gray). The running
+  // list comes from the OS process table (sees foreground AND background runs);
+  // the finished list from run-history.jsonl.
+  function appendSubagentSections(card) {
+    const s = (status && status.subagents) || {
+      running: 0,
+      runningList: [],
+      doneSession: 0,
+      failedSession: 0,
+      recent: [],
+    };
+
+    const runWrap = document.createElement("div");
+    runWrap.style.marginTop = "4px";
+    runWrap.style.marginBottom = "10px";
+    runWrap.appendChild(sectionHeading("正在运行", GREEN, s.running || 0));
+    if (!s.runningList || s.runningList.length === 0) {
+      runWrap.appendChild(emptyRow("无运行中的子会话"));
+    } else {
+      for (const r of s.runningList) {
+        const tag = r.source === "background" ? r.mode || "bg" : "前台";
+        runWrap.appendChild(
+          subagentRow({ name: r.agent || "subagent", tag, title: r.pid ? `pid ${r.pid}` : undefined })
+        );
+      }
+    }
+    card.appendChild(runWrap);
+
+    const doneWrap = document.createElement("div");
+    doneWrap.style.marginTop = "4px";
+    doneWrap.style.marginBottom = "6px";
+    const doneLabel = (s.failedSession || 0) > 0 ? `本次完成（失败 ${s.failedSession}）` : "本次完成";
+    doneWrap.appendChild(sectionHeading(doneLabel, GRAY, s.doneSession || 0));
+    if (!s.recent || s.recent.length === 0) {
+      doneWrap.appendChild(emptyRow("暂无记录"));
+    } else {
+      for (const e of s.recent) {
+        const ok = e.status !== "error";
+        doneWrap.appendChild(
+          subagentRow({
+            name: e.agent,
+            tag: fmtDuration(e.durationMs) || (ok ? "ok" : "error"),
+            tagColor: ok ? "var(--text-dim, #9ca3af)" : RED,
+          })
+        );
+      }
+    }
+    card.appendChild(doneWrap);
+  }
+
   // --- data + lifecycle ---
   async function refresh() {
     try {
@@ -710,17 +917,30 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     return status;
   }
 
+  // Self-rescheduling poll: tight cadence while subagents are running (so the
+  // live count tracks them), relaxed when idle. Process enumeration is the only
+  // non-trivial cost and it only runs at the active cadence during actual runs.
+  let refreshTimer = null;
+  function nextDelay() {
+    const running = status && status.subagents ? status.subagents.running : 0;
+    return running > 0 ? REFRESH_ACTIVE_MS : REFRESH_MS;
+  }
+  function scheduleRefresh() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => {
+      if (document.visibilityState === "visible") refresh().finally(scheduleRefresh);
+      else scheduleRefresh();
+    }, nextDelay());
+  }
+
   function init() {
     ensureHost();
     setupReserve();
-    refresh();
-    // Keep counts fresh (cheap file reads); also refresh when the window regains
-    // focus so config edits show up without a restart.
-    setInterval(() => {
-      if (document.visibilityState === "visible") refresh();
-    }, REFRESH_MS);
+    refresh().finally(scheduleRefresh);
+    // Also refresh when the window regains focus so config edits / new runs show
+    // up immediately without waiting for the next tick.
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") refresh();
+      if (document.visibilityState === "visible") refresh().finally(scheduleRefresh);
     });
     // Close the popover on outside click / Esc.
     document.addEventListener("click", (e) => {

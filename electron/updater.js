@@ -15,14 +15,14 @@ const { execFile } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
-const PKG = "@agegr/pi-web";
+const PKG = "@cking000/pi-web";
 // Bundled inside @agegr/pi-web; surfaced in the update CTA so the result names
 // both packages the user cares about.
 const AGENT_PKG = "@earendil-works/pi-coding-agent";
 
 function getInstalledVersion(runtimeDir) {
   try {
-    const p = path.join(runtimeDir, "node_modules", "@agegr", "pi-web", "package.json");
+    const p = path.join(runtimeDir, "node_modules", "@cking000", "pi-web", "package.json");
     return JSON.parse(fs.readFileSync(p, "utf8")).version;
   } catch {
     return null;

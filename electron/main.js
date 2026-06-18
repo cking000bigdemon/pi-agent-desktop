@@ -93,7 +93,7 @@ function runtimeDir() {
   return _runtimeDirCache;
 }
 function piWebPkgDir() {
-  return path.join(runtimeDir(), "node_modules", "@agegr", "pi-web");
+  return path.join(runtimeDir(), "node_modules", "@cking000", "pi-web");
 }
 function nextBinPath() {
   return path.join(runtimeDir(), "node_modules", "next", "dist", "bin", "next");
@@ -158,7 +158,7 @@ async function ensureRuntime() {
     const v = updater.getInstalledVersion(rt);
     if (v) return v;
   }
-  if (!fs.existsSync(path.join(seed, "node_modules", "@agegr", "pi-web", ".next"))) {
+  if (!fs.existsSync(path.join(seed, "node_modules", "@cking000", "pi-web", ".next"))) {
     throw new Error(`runtime seed not found or incomplete at ${seed}`);
   }
   await fs.promises.mkdir(rt, { recursive: true });
@@ -458,15 +458,20 @@ ipcMain.on("pi-web-desktop:apply-update", () => {
 // Backend for the bottom dashboard bar injected by preload.js. Reads ~/.pi
 // config directly (see features/dashboard.js) and reports active/inactive
 // MCP servers and extensions. Never throws — returns a partial result + error.
-ipcMain.handle("pi-web-desktop:dashboard-status", () => {
+ipcMain.handle("pi-web-desktop:dashboard-status", async () => {
   try {
-    return dashboard.readStatus({ sinceMs: APP_BOOT_MS });
+    // serverPid scopes subagent counting to THIS app's child processes.
+    return await dashboard.readStatus({
+      sinceMs: APP_BOOT_MS,
+      serverPid: serverProc && !serverProc.killed ? serverProc.pid : undefined,
+    });
   } catch (e) {
     dbg(`dashboard-status error ${(e && e.message) || e}`);
     return {
       mcp: { active: [], inactive: [] },
       extensions: { active: [], inactive: [] },
       tokens: { total: 0, input: 0, output: 0, calls: 0, sessions: 0 },
+      subagents: { running: 0, runningList: [], doneSession: 0, failedSession: 0, recent: [] },
       error: String((e && e.message) || e),
     };
   }
