@@ -9,6 +9,7 @@
   "scripts": {
     "start": "electron .",
     "seed": "cd runtime-seed && npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com",
+    "seed:extensions": "cd extensions-seed && npm ci --omit=dev --registry=https://registry.npmmirror.com",
     "dist": "electron-builder",
     "dist:dir": "electron-builder --dir"
   },

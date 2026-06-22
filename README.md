@@ -20,12 +20,13 @@ pi-web-desktop/
 │   └── ui/             # ★ 自定义能力的前端页面(可选,见「开发约束」)
 ├── vendor/node/        # 内置 Node.js 运行时(node.exe + npm) → 打包进 resources/node   ← 构建输入
 ├── runtime-seed/       # @cking000/pi-web 的 npm 生产安装(含 .next) → 打包进 resources/runtime-seed ← 构建输入
+├── extensions-seed/    # 默认随装的 5 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
 ├── build/              # 应用图标(icon.svg / icon.png / icon.ico)
 ├── electron-builder.yml
 └── package.json
 ```
 
-> `vendor/`、`runtime-seed/`、以及 pi-web fork 的本地工作副本 `pi-web/` 都是构建输入或独立仓库,体积大、已 gitignore,需按下文重新准备。
+> `vendor/`、`runtime-seed/`、`extensions-seed/node_modules`、以及 pi-web fork 的本地工作副本 `pi-web/` 都是构建输入或独立仓库,体积大、已 gitignore,需按下文重新准备(`extensions-seed/` 下的 5 个 `.ts` 扩展源码与清单**已纳入版本库**,只有它们的 `node_modules` 是构建输入)。
 > `features/`、`ui/` 标 ★ 的是给后续自定义能力预留的位置,初始可不存在。
 
 ## 运行架构
@@ -40,7 +41,7 @@ pi-web-desktop/
    用内置 npm `view` 对比版本,有新版则 `npm install @cking000/pi-web@latest --omit=dev`,重启服务并刷新窗口。
 5. **退出**:`taskkill /T`(Windows)结束服务进程树,不留僵尸进程。
 
-数据目录沿用 pi 的 `~/.pi/agent`(会话、`models.json`、模型凭证),与终端 `pi`、全局 `pi-web` 共享。
+数据目录沿用 pi 的 `~/.pi/agent`(会话、`models.json`、模型凭证),与终端 `pi`、全局 `pi-web` 共享。**每次启动**还会把内置的 5 个默认扩展(`extensions-seed/`,**仓库为唯一真源、在此开发**)同步进 `~/.pi/agent/extensions/`:这 5 个受管文件**内容不同即覆盖**(故「在仓库改 → 重装 / 重新运行」即可部署),`node_modules` 在缺失或 lockfile 变化时刷新;仓库外的其它扩展一律不动。见 `main.js` 的 `ensureBundledExtensions()`。**⚠ 不要手改数据目录里这 5 个文件——会被下次启动覆盖。**
 
 ## 安装注意(首启是否秒开取决于安装目录)
 
@@ -69,6 +70,9 @@ mkdir runtime-seed; cd runtime-seed; npm init -y
 npm install @cking000/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com
 cd ..
 
+# 2b. 准备默认扩展的共享依赖(5 个 .ts 扩展源码已在版本库;此步只装它们的 node_modules)
+npm run seed:extensions
+
 # 3. 准备内置 Node 运行时(win-x64)
 #    下载 node-v22.12.0-win-x64.zip 解压为 vendor/node(含 node.exe + npm)
 #    例:https://registry.npmmirror.com/-/binary/node/v22.12.0/node-v22.12.0-win-x64.zip
@@ -89,11 +93,13 @@ npm start
 - `PI_WEB_AUTO_UPDATE_CHECK=0` —— 关闭启动后的自动检查更新。
 - `PI_CODING_AGENT_DIR` —— 指定 pi 会话数据目录(默认 `~/.pi/agent`)。
 
+开发这 5 个默认扩展:直接改 `extensions-seed/*.ts`,`npm start`(开发态)启动时就会把改动同步进 `~/.pi/agent/extensions/`(内容不同即覆盖),无需手动复制,改完重启即可验证;若**新增/变更依赖**,改 `extensions-seed/package.json` 后跑 `npm run seed:extensions` 重建其 `node_modules`(lockfile 变化会触发下次启动刷新已部署的依赖)。
+
 排障:主进程会把关键步骤写到 `%TEMP%/pi-web-desktop-debug.log`。
 
 ## 打包安装程序
 
-确保 `build/icon.ico` 存在,且 `vendor/node`、`runtime-seed` 已准备好,然后:
+确保 `build/icon.ico` 存在,且 `vendor/node`、`runtime-seed`、`extensions-seed`(其 `node_modules` 跑 `npm run seed:extensions` 准备)已准备好,然后:
 
 ```bash
 npm run dist        # 生成 dist/Pi Agent Setup x.x.x.exe (NSIS)

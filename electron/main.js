@@ -176,6 +176,105 @@ async function ensureRuntime() {
 }
 
 // ---------------------------------------------------------------------------
+// Bundled extensions sync (repo extensions-seed/ is the source of truth)
+// ---------------------------------------------------------------------------
+// Five single-file `.ts` extensions ship with the app. The repo's
+// `extensions-seed/` is their CANONICAL SOURCE — they are developed there, never
+// hand-edited in the data dir. On every launch we sync the bundle into
+// ~/.pi/agent/extensions/ so the deployed copies always match the installed
+// version: each managed file is (over)written whenever its content differs from
+// the bundle, which is what makes the "edit in the repo → reinstall (or re-run)"
+// loop actually deploy changes. The shared node_modules is deployed when missing
+// or when the bundled lockfile changed; at runtime only @modelcontextprotocol/sdk
+// (+ transitive deps) is needed — pi injects @earendil-works/pi-coding-agent into
+// the extension loader itself, so it is intentionally NOT bundled.
+//
+// Only these 5 managed names are touched (any other file in the dir is left
+// alone), and any failure here is logged and swallowed so it can never block boot.
+const DEFAULT_EXTENSIONS = [
+  "agents-md-injector.ts",
+  "auto-session-title.ts",
+  "general-agent-prompt.ts",
+  "mcp-bridge.ts",
+  "python-workdir-guard.ts",
+];
+
+function extensionsSeedDir() {
+  return path.join(resourcesBase(), "extensions-seed");
+}
+
+function piAgentDir() {
+  // Same resolution the running agent (and features/dashboard.js) uses.
+  return process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+}
+
+// Byte-equal compare so we only write when the bundle actually changed (no
+// needless writes / mtime churn on every launch). A missing file compares unequal.
+function sameContent(a, b) {
+  try {
+    const sa = fs.statSync(a);
+    const sb = fs.statSync(b);
+    if (sa.size !== sb.size) return false;
+    return fs.readFileSync(a).equals(fs.readFileSync(b));
+  } catch {
+    return false;
+  }
+}
+
+async function ensureBundledExtensions() {
+  const seed = extensionsSeedDir();
+  if (!fs.existsSync(seed)) {
+    dbg(`extensions seed missing at ${seed} — skipping extension sync`);
+    return;
+  }
+  const dest = path.join(piAgentDir(), "extensions");
+  await fs.promises.mkdir(dest, { recursive: true });
+
+  // Shared deps: deploy when dest has none yet, or when the bundled lockfile
+  // differs from the deployed one (a dependency changed). robocopy /E (in
+  // copyRuntime) overwrites changed files; rare stale leftovers are harmless.
+  const seedNm = path.join(seed, "node_modules");
+  const destNm = path.join(dest, "node_modules");
+  const depsChanged =
+    fs.existsSync(seedNm) &&
+    (!fs.existsSync(destNm) ||
+      !sameContent(path.join(seed, "package-lock.json"), path.join(dest, "package-lock.json")));
+  if (depsChanged) {
+    dbg(`syncing extension deps: ${seedNm} -> ${destNm}`);
+    await fs.promises.mkdir(destNm, { recursive: true });
+    await copyRuntime(seedNm, destNm);
+    for (const manifest of ["package.json", "package-lock.json"]) {
+      const s = path.join(seed, manifest);
+      if (fs.existsSync(s)) {
+        try {
+          fs.copyFileSync(s, path.join(dest, manifest));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  // The 5 managed extension files: (over)write whenever content differs from the
+  // bundle. The user no longer edits these in the data dir — the repo wins.
+  let synced = 0;
+  for (const file of DEFAULT_EXTENSIONS) {
+    const s = path.join(seed, file);
+    if (!fs.existsSync(s)) continue;
+    const d = path.join(dest, file);
+    if (sameContent(s, d)) continue;
+    try {
+      fs.copyFileSync(s, d);
+      synced++;
+      dbg(`synced managed extension: ${file}`);
+    } catch (e) {
+      dbg(`failed to sync ${file}: ${(e && e.message) || e}`);
+    }
+  }
+  dbg(`ensureBundledExtensions done; synced ${synced} file(s) to ${dest}`);
+}
+
+// ---------------------------------------------------------------------------
 // Server process management
 // ---------------------------------------------------------------------------
 let serverProc = null;
@@ -486,7 +585,7 @@ function createWindow() {
     height: 880,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: "#0b0b0c",
+    backgroundColor: "#0A0A0A", // pi-web Metro dark canvas (--bg) — avoids a pre-paint flash
     autoHideMenuBar: true,
     title: "Pi Agent",
     icon: path.join(__dirname, "..", "build", "icon.png"),
@@ -546,6 +645,13 @@ async function boot() {
     const v = await ensureRuntime();
     dbg(`runtime ready v=${v}`);
     console.log(`[pi-web-desktop] runtime ready, pi-web ${v}`);
+    // Sync the bundled extensions (repo extensions-seed/ is the source of truth)
+    // into ~/.pi before the server starts. Non-fatal: never block boot.
+    try {
+      await ensureBundledExtensions();
+    } catch (e) {
+      dbg(`ensureBundledExtensions error (non-fatal): ${(e && e.stack) || e}`);
+    }
     await startOrRestartServer();
     dbg("startOrRestartServer returned ok");
     if (AUTO_CHECK) {

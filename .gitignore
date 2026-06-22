@@ -5,6 +5,8 @@ dist/
 # Build inputs that are regenerated (see README):
 #  - vendor/node  : bundled Node.js runtime (downloaded)
 #  - runtime-seed : npm prod install of @agegr/pi-web
+#  - extensions-seed/node_modules : deps for the bundled default extensions
+#    (regenerated via `npm run seed:extensions`; the .ts sources ARE committed)
 vendor/
 runtime-seed/
 

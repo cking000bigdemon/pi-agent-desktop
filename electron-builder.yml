@@ -24,6 +24,13 @@ extraResources:
       - "**/*"
       - "!**/*.map"
       - "!**/.cache/**"
+  # Default pi extensions (5 single-file .ts + shared deps) -> resources/extensions-seed.
+  # Copied into ~/.pi/agent/extensions/ on first run (see ensureBundledExtensions in main.js).
+  - from: extensions-seed
+    to: extensions-seed
+    filter:
+      - "**/*"
+      - "!**/*.map"
 
 win:
   target:
