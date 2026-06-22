@@ -30,17 +30,20 @@ contextBridge.exposeInMainWorld("piWebDesktop", {
 // (14px radius + soft slate shadow). Each var() carries a light-theme fallback,
 // and because the tokens are read live the toast follows pi-web's theme.
 
-// pi-web's monospace chrome stack (fallback if --font-mono is unavailable).
-const MONO =
-  'var(--font-mono, "JetBrains Mono", "Fira Code", Consolas, ui-monospace, "PingFang SC", "Microsoft YaHei", monospace)';
+// pi-web's Metro chrome font — Segoe UI on Windows, Selawik/Open Sans elsewhere.
+// Inherits --font-ui through the shadow boundary; the literal fallback mirrors
+// pi-web/app/globals.css so the shell reads identically before vars resolve.
+const UI =
+  "var(--font-ui, 'Segoe UI', Selawik, system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif)";
 
-// Semantic status accents. pi-web only ships a single blue --accent token, so
-// success/warn/error reuse a harmonising palette; "latest" uses --accent itself.
+// Semantic status accents drawn from pi-web's Windows Phone tile palette
+// (--tile-* in globals.css, inherited through the shadow boundary); literal
+// fallbacks are the same WP swatches so colour is right before vars resolve.
 const STATUS = {
-  updated: "#16a34a", // green  — installed a new version
-  latest: "var(--accent, #2563eb)", // blue   — already up to date
-  available: "#d97706", // amber  — update available (deferred)
-  error: "#dc2626", // red    — check/update failed
+  updated: "var(--tile-green, #60A917)", // green  — installed a new version
+  latest: "var(--accent, #0050EF)", // cobalt — already up to date
+  available: "var(--tile-amber, #F0A30A)", // amber  — update available (deferred)
+  error: "var(--tile-red, #E51400)", // red    — check/update failed
 };
 
 let hostEl = null;
@@ -79,17 +82,18 @@ function renderNotice(notice) {
     cs.boxSizing = "border-box";
     cs.width = "340px";
     cs.padding = "13px 15px";
-    cs.borderRadius = "14px";
-    cs.background = "var(--bg, #ffffff)";
+    cs.borderRadius = "0"; // Metro tiles are square — no rounding
+    cs.background = "var(--bg-panel, #ffffff)";
     cs.color = "var(--text, #1a1a1a)";
-    cs.border = "1px solid var(--border, #e0e0e0)";
-    cs.boxShadow = "rgba(15,23,42,0.04) 0 1px 2px 0, rgba(15,23,42,0.10) 0 8px 24px -12px";
-    cs.fontFamily = MONO;
+    cs.border = "1px solid var(--border, rgba(0,0,0,0.06))";
+    cs.borderLeft = "3px solid " + accent; // WP left accent bar carries the status colour
+    cs.boxShadow = "0 2px 14px rgba(0,0,0,0.22)"; // minimal float separation, no soft slate
+    cs.fontFamily = UI;
     cs.fontSize = "13px";
     cs.lineHeight = "1.5";
     cs.opacity = "0";
-    cs.transform = "translateY(-8px)";
-    cs.transition = "opacity .2s ease, transform .2s ease";
+    cs.transform = "translateY(-10px)";
+    cs.transition = "opacity .22s ease, transform .26s cubic-bezier(0.1,0.9,0.2,1)";
 
     // --- header: status dot + title + close ---
     const head = document.createElement("div");
@@ -102,7 +106,7 @@ function renderNotice(notice) {
     ds.flex = "0 0 auto";
     ds.width = "8px";
     ds.height = "8px";
-    ds.borderRadius = "50%";
+    ds.borderRadius = "0"; // square WP status indicator
     ds.background = accent;
     // subtle halo in the status colour (ignored if color-mix is unsupported)
     ds.boxShadow = "0 0 0 3px color-mix(in srgb, " + accent + " 15%, transparent)";
@@ -123,11 +127,11 @@ function renderNotice(notice) {
     xs.border = "none";
     xs.background = "transparent";
     xs.color = "var(--text-dim, #9ca3af)";
-    xs.fontFamily = MONO;
+    xs.fontFamily = UI;
     xs.fontSize = "12px";
     xs.lineHeight = "1";
     xs.padding = "2px 4px";
-    xs.borderRadius = "6px";
+    xs.borderRadius = "0";
     close.addEventListener("mouseenter", () => (close.style.color = "var(--text, #1a1a1a)"));
     close.addEventListener("mouseleave", () => (close.style.color = "var(--text-dim, #9ca3af)"));
 
@@ -175,17 +179,17 @@ function renderNotice(notice) {
       as.marginTop = "12px";
       as.width = "100%";
       as.cursor = "pointer";
-      as.padding = "8px 12px";
+      as.padding = "9px 12px";
       as.border = "none";
-      as.borderRadius = "8px";
-      as.background = "var(--accent, #2563eb)";
+      as.borderRadius = "0"; // square Metro command button
+      as.background = "var(--accent, #0050EF)";
       as.color = "#ffffff";
-      as.fontFamily = MONO;
+      as.fontFamily = UI;
       as.fontSize = "12.5px";
       as.fontWeight = "600";
       as.letterSpacing = "0.3px";
-      act.addEventListener("mouseenter", () => (act.style.background = "var(--accent-hover, #1d4ed8)"));
-      act.addEventListener("mouseleave", () => (act.style.background = "var(--accent, #2563eb)"));
+      act.addEventListener("mouseenter", () => (act.style.background = "var(--accent-hover, #2F6BFF)"));
+      act.addEventListener("mouseleave", () => (act.style.background = "var(--accent, #0050EF)"));
       act.addEventListener("click", () => {
         act.disabled = true;
         act.textContent = "正在更新…";
@@ -232,12 +236,14 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
   // shell's own file:// pages (loading/updating/error).
   if (location.protocol !== "http:") return;
 
-  const GREEN = "#16a34a"; // 已激活 / 运行中
-  const RED = "#dc2626"; //  暂未激活 / 失败
+  const GREEN = "var(--tile-green, #60A917)"; // 已激活 / 运行中 (WP green tile)
+  const RED = "var(--tile-red, #E51400)"; //  暂未激活 / 失败 (WP red tile)
   const GRAY = "var(--text-dim, #9ca3af)"; // 本次会话已完成（中性）
   const REFRESH_MS = 20000; // idle cadence
   const REFRESH_ACTIVE_MS = 3000; // faster cadence while subagents are running
   const BAR_H = 30; // bar height (px); kept in sync with the reserved space
+  const reduceMotion =
+    typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   let host = null;
   let bar = null;
@@ -245,6 +251,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
   let openCategory = null; // null | "mcp" | "extensions"
   let status = null;
   let chips = {}; // category -> { active, inactive } count <span>s
+  let subagentPulse = null; // WAAPI handle for the running sub-agent live-tile pulse
 
   function whenBodyReady(cb) {
     if (document.body) cb();
@@ -258,7 +265,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     st.display = "inline-block";
     st.width = (size || 7) + "px";
     st.height = (size || 7) + "px";
-    st.borderRadius = "50%";
+    st.borderRadius = "0"; // square WP live-tile indicator
     st.background = color;
     return s;
   }
@@ -343,11 +350,11 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     bs.justifyContent = "flex-end";
     bs.gap = "4px";
     bs.padding = "0 14px";
-    bs.fontFamily = MONO;
+    bs.fontFamily = UI;
     bs.fontSize = "12px";
     bs.color = "var(--text-muted, #6b7280)";
-    bs.background = "var(--bg, #ffffff)";
-    bs.borderTop = "1px solid var(--border, #e5e7eb)";
+    bs.background = "var(--bg-panel, #ffffff)"; // distinct tile-surface strip
+    bs.borderTop = "1px solid var(--border, rgba(0,0,0,0.06))";
     bs.pointerEvents = "none"; // only the chips are interactive (set below)
 
     bar.appendChild(buildTotalChip());
@@ -380,7 +387,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     cs.alignItems = "center";
     cs.gap = "6px";
     cs.padding = "5px 8px";
-    cs.fontFamily = MONO;
+    cs.fontFamily = UI;
     cs.fontSize = "12px";
     cs.color = "var(--text, #1a1a1a)";
 
@@ -391,6 +398,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     const val = document.createElement("span");
     val.textContent = "–";
     val.style.fontWeight = "600";
+    val.style.fontVariantNumeric = "tabular-nums";
 
     chip.appendChild(label);
     chip.appendChild(val);
@@ -422,11 +430,11 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     cs.border = "none";
     cs.background = "transparent";
     cs.color = "var(--text, #1a1a1a)";
-    cs.fontFamily = MONO;
+    cs.fontFamily = UI;
     cs.fontSize = "12px";
     cs.lineHeight = "1";
     cs.padding = "5px 8px";
-    cs.borderRadius = "8px";
+    cs.borderRadius = "0"; // square Metro chip
     cs.transition = "background .15s ease";
     chip.addEventListener(
       "mouseenter",
@@ -449,11 +457,13 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     active.textContent = "–";
     active.style.color = GREEN;
     active.style.fontWeight = "600";
+    active.style.fontVariantNumeric = "tabular-nums";
 
     const inactive = document.createElement("span");
     inactive.textContent = "–";
     inactive.style.color = RED;
     inactive.style.fontWeight = "600";
+    inactive.style.fontVariantNumeric = "tabular-nums";
 
     chip.appendChild(name);
     chip.appendChild(dot(GREEN));
@@ -483,11 +493,11 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     cs.border = "none";
     cs.background = "transparent";
     cs.color = "var(--text, #1a1a1a)";
-    cs.fontFamily = MONO;
+    cs.fontFamily = UI;
     cs.fontSize = "12px";
     cs.lineHeight = "1";
     cs.padding = "5px 8px";
-    cs.borderRadius = "8px";
+    cs.borderRadius = "0"; // square Metro chip
     cs.transition = "background .15s ease";
     chip.addEventListener(
       "mouseenter",
@@ -513,11 +523,13 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     running.textContent = "–";
     running.style.color = GREEN;
     running.style.fontWeight = "600";
+    running.style.fontVariantNumeric = "tabular-nums";
 
     const done = document.createElement("span");
     done.textContent = "–";
     done.style.color = GRAY;
     done.style.fontWeight = "600";
+    done.style.fontVariantNumeric = "tabular-nums";
 
     chip.appendChild(name);
     chip.appendChild(runDot);
@@ -562,8 +574,33 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
       const failed = s ? s.failedSession || 0 : 0;
       chips.subagents.running.textContent = String(running);
       chips.subagents.done.textContent = String(done);
-      // Dim the green dot when idle so a running session genuinely stands out.
-      chips.subagents.runDot.style.opacity = running > 0 ? "1" : "0.35";
+      // Live-tile pulse: while a sub-agent runs, the green square pulses (WAAPI —
+      // CSP-safe, mirrors pi-web's dotPulse keyframe); idle dims it so a running
+      // session genuinely stands out. Respects prefers-reduced-motion.
+      const rd = chips.subagents.runDot;
+      if (running > 0) {
+        rd.style.opacity = "1";
+        if (!subagentPulse && !reduceMotion) {
+          try {
+            subagentPulse = rd.animate(
+              [
+                { opacity: 1, transform: "scale(1)" },
+                { opacity: 0.4, transform: "scale(0.65)" },
+                { opacity: 1, transform: "scale(1)" },
+              ],
+              { duration: 1400, iterations: Infinity, easing: "ease-in-out" }
+            );
+          } catch {
+            /* WAAPI unavailable — the static dot is fine */
+          }
+        }
+      } else {
+        if (subagentPulse) {
+          subagentPulse.cancel();
+          subagentPulse = null;
+        }
+        rd.style.opacity = "0.35";
+      }
       chips.subagents.el.title = s
         ? `子会话（sub-agent）：${running} 个运行中\n` +
           `本次启动已完成 ${done} 个${failed ? `，失败 ${failed} 个` : ""}`
@@ -628,17 +665,18 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     cs.overflowY = "auto";
     cs.pointerEvents = "auto";
     cs.padding = "13px 15px";
-    cs.borderRadius = "14px";
-    cs.background = "var(--bg, #ffffff)";
+    cs.borderRadius = "0"; // Metro tiles are square — no rounding
+    cs.background = "var(--bg-panel, #ffffff)";
     cs.color = "var(--text, #1a1a1a)";
-    cs.border = "1px solid var(--border, #e0e0e0)";
-    cs.boxShadow = "rgba(15,23,42,0.04) 0 1px 2px 0, rgba(15,23,42,0.14) 0 12px 32px -12px";
-    cs.fontFamily = MONO;
+    cs.border = "1px solid var(--border, rgba(0,0,0,0.06))";
+    cs.borderLeft = "3px solid var(--accent, #0050EF)"; // WP cobalt accent bar
+    cs.boxShadow = "0 2px 16px rgba(0,0,0,0.24)"; // minimal float separation, no soft slate
+    cs.fontFamily = UI;
     cs.fontSize = "13px";
     cs.lineHeight = "1.5";
     cs.opacity = "0";
-    cs.transform = "translateY(8px)";
-    cs.transition = "opacity .18s ease, transform .18s ease";
+    cs.transform = "translateY(10px)";
+    cs.transition = "opacity .18s ease, transform .22s cubic-bezier(0.1,0.9,0.2,1)";
 
     const data = (status && status[category]) || { active: [], inactive: [] };
     const title = category === "mcp" ? "MCP" : category === "subagents" ? "Sub-agents" : "Extensions";
@@ -667,11 +705,11 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     xs.border = "none";
     xs.background = "transparent";
     xs.color = "var(--text-dim, #9ca3af)";
-    xs.fontFamily = MONO;
+    xs.fontFamily = UI;
     xs.fontSize = "12px";
     xs.lineHeight = "1";
     xs.padding = "2px 4px";
-    xs.borderRadius = "6px";
+    xs.borderRadius = "0";
     close.addEventListener("mouseenter", () => (close.style.color = "var(--text, #1a1a1a)"));
     close.addEventListener("mouseleave", () => (close.style.color = "var(--text-dim, #9ca3af)"));
     close.addEventListener("click", (e) => {
@@ -773,8 +811,8 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
       tag.style.marginLeft = "auto";
       tag.style.fontSize = "10.5px";
       tag.style.color = "var(--text-dim, #9ca3af)";
-      tag.style.border = "1px solid var(--border, #e5e7eb)";
-      tag.style.borderRadius = "5px";
+      tag.style.border = "1px solid var(--border, rgba(0,0,0,0.06))";
+      tag.style.borderRadius = "0";
       tag.style.padding = "0 5px";
       row.appendChild(tag);
     }
@@ -847,8 +885,8 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
       tag.style.marginLeft = "auto";
       tag.style.fontSize = "10.5px";
       tag.style.color = o.tagColor || "var(--text-dim, #9ca3af)";
-      tag.style.border = "1px solid var(--border, #e5e7eb)";
-      tag.style.borderRadius = "5px";
+      tag.style.border = "1px solid var(--border, rgba(0,0,0,0.06))";
+      tag.style.borderRadius = "0";
       tag.style.padding = "0 5px";
       row.appendChild(tag);
     }
