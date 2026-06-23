@@ -1,7 +1,7 @@
 {
   "name": "pi-web-desktop",
   "productName": "Pi Agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Standalone desktop application wrapping pi-web (Electron). Bundles the pi-web Next.js server and a Chromium window into a single app.",
   "license": "MIT",
   "author": "",
