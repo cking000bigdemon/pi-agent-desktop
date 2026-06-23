@@ -197,6 +197,7 @@ const DEFAULT_EXTENSIONS = [
   "general-agent-prompt.ts",
   "mcp-bridge.ts",
   "python-workdir-guard.ts",
+  "variflight-web-search.ts",
 ];
 
 function extensionsSeedDir() {
