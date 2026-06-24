@@ -20,6 +20,7 @@
  *   PI_GP_FAITHFUL=0  不追加忠实工作段
  *   PI_GP_COMMS=0     不追加沟通风格段（含"默认中文回复"）
  *   PI_GP_TOOLS=0     不追加工具卫生段
+ *   PI_GP_RUNTIME=0   不追加桌面运行时段（仅在检测到 Pi Agent 桌面壳时才会注入）
  */
 
 import { execFile } from "node:child_process";
@@ -122,6 +123,24 @@ const COMMS = `# Communication
 - When referencing a specific file or line of code, use the file_path:line_number format so it is clickable.
 - Do not put a colon immediately before a tool call — your tool calls may not be shown, so "Let me read the file." reads better than "Let me read the file:".`;
 
+// === 桌面运行时段（仅在 Pi Agent 桌面壳内注入）===========================
+// 唯一没被别处覆盖的认知：pi 跑在桌面 app 里、Node+Python 已内置。技能清单由 pi
+// 原生注入、venv/$PI_BUNDLED_PYTHON 由 python-workdir-guard 注入——此处不重复，只
+// 点"它们存在 + 别让用户装运行时"，并给一个始终有效的 repo URL 指针（打包后的
+// app 里没有 README / .git，所以用 URL 而非本地路径，按需 fetch）。
+
+const REPO_URL = "https://github.com/cking000bigdemon/pi-agent-desktop";
+
+const RUNTIME = `# Runtime
+- You are running inside the Pi Agent desktop app (Electron). Node and Python runtimes are BUNDLED — never tell the user to install Node/npm/Python; they already have them. Bundled knowledge-base (wiki-*) and slide (ppt-master) skills are available (see the skills list); prefer them for those tasks.
+- This app's source & docs live at ${REPO_URL} — its README describes the bundled runtimes, default extensions/skills, and the venv guard. These files are NOT on this machine; fetch from the URL if you need that detail.`;
+
+// 桌面壳启动 pi 服务时会注入 PI_BUNDLED_PYTHON（见 main.js bundledPythonGuardEnv）。
+// 它存在 ⇒ 运行在桌面 app 内；缺失 ⇒ 终端 pi / SDK，本段保持沉默以维持扩展通用性。
+function inDesktopRuntime(): boolean {
+  return !!process.env.PI_BUNDLED_PYTHON;
+}
+
 function toolsSection(selected: string[] | undefined): string {
   const sel = selected ?? [];
   const has = (n: string) => sel.length === 0 || sel.includes(n);
@@ -158,6 +177,7 @@ export default function (pi: ExtensionAPI) {
 
       const sections: string[] = [];
       if (!off(process.env.PI_GP_ENV)) sections.push(await envSection(ctx.cwd));
+      if (inDesktopRuntime() && !off(process.env.PI_GP_RUNTIME)) sections.push(RUNTIME);
       if (!off(process.env.PI_GP_ACTIONS)) sections.push(ACTIONS);
       if (!off(process.env.PI_GP_FAITHFUL)) sections.push(FAITHFUL);
       if (!off(process.env.PI_GP_COMMS)) sections.push(COMMS);
@@ -185,6 +205,11 @@ export default function (pi: ExtensionAPI) {
         "",
         "=== 追加段 ===",
         off(process.env.PI_GP_ENV) ? "(env 关闭)" : await envSection(ctx.cwd),
+        !inDesktopRuntime()
+          ? "(runtime 跳过：非桌面壳)"
+          : off(process.env.PI_GP_RUNTIME)
+            ? "(runtime 关闭)"
+            : RUNTIME,
         off(process.env.PI_GP_ACTIONS) ? "(actions 关闭)" : ACTIONS,
         off(process.env.PI_GP_FAITHFUL) ? "(faithful 关闭)" : FAITHFUL,
         off(process.env.PI_GP_COMMS) ? "(comms 关闭)" : COMMS,
