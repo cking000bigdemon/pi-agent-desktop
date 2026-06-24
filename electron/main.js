@@ -376,40 +376,6 @@ function skillBundleSignature(dir) {
   return crypto.createHash("md5").update(parts.join("\n")).digest("hex");
 }
 
-// Recursively copy `src` tree into `dst`, writing only files whose content
-// differs (no churn). Skips __pycache__ dirs and *.pyc. Does not prune files
-// removed from the seed (rare; harmless — mirrors the extensions seed policy).
-// Returns the number of files written.
-function syncSkillTree(src, dst) {
-  let written = 0;
-  let entries;
-  try {
-    entries = fs.readdirSync(src, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  fs.mkdirSync(dst, { recursive: true });
-  for (const ent of entries) {
-    if (ent.isDirectory()) {
-      if (ent.name === "__pycache__") continue;
-      written += syncSkillTree(path.join(src, ent.name), path.join(dst, ent.name));
-    } else if (ent.isFile()) {
-      if (ent.name.endsWith(".pyc")) continue;
-      const s = path.join(src, ent.name);
-      const d = path.join(dst, ent.name);
-      if (sameContent(s, d)) continue;
-      try {
-        fs.mkdirSync(path.dirname(d), { recursive: true });
-        fs.copyFileSync(s, d);
-        written++;
-      } catch (e) {
-        dbg(`failed to sync skill file ${d}: ${(e && e.message) || e}`);
-      }
-    }
-  }
-  return written;
-}
-
 async function ensureBundledSkills() {
   const seed = skillsSeedDir();
   if (!fs.existsSync(seed)) {
@@ -439,16 +405,21 @@ async function ensureBundledSkills() {
       skipped++;
       continue;
     }
-    const n = syncSkillTree(s, skillDest);
-    synced += n;
+    // Copy via robocopy/cp (a SPAWNED process) rather than a synchronous
+    // fs.copyFileSync loop: a large skill like ppt-master (~12k files) would
+    // otherwise block the main thread for tens of seconds and freeze the window
+    // ("not responding") on first deploy. `await` here yields to the event loop
+    // while the child process runs, so the window stays responsive.
     try {
+      await copyRuntime(s, skillDest);
+      synced++;
       fs.writeFileSync(stampFile, sig);
+      dbg(`synced skill ${name} (full copy)`);
     } catch (e) {
-      dbg(`failed to write ${stampFile}: ${(e && e.message) || e}`);
+      dbg(`failed to sync skill ${name}: ${(e && e.message) || e}`);
     }
-    dbg(`synced skill ${name}: ${n} file(s)`);
   }
-  dbg(`ensureBundledSkills done; synced ${synced} file(s), ${skipped} skill(s) up-to-date, to ${dest}`);
+  dbg(`ensureBundledSkills done; synced ${synced} skill(s), ${skipped} up-to-date, to ${dest}`);
 }
 
 // ---------------------------------------------------------------------------
