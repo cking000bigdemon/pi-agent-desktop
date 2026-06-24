@@ -138,7 +138,11 @@ async function createVenvIfMissing(cwd: string): Promise<{ created: boolean; err
   const venv = getVenvPath(cwd);
   await fsp.mkdir(path.dirname(venv), { recursive: true });
 
-  const candidates: Array<{ command: string; args: string[] }> = process.platform === "win32"
+  // PI_PY_GUARD_PYTHON (set by the desktop app to the BUNDLED interpreter) is
+  // tried first so a fresh machine with no system Python still gets a .venv —
+  // zero system-Python dependency.
+  const bundled = process.env.PI_PY_GUARD_PYTHON;
+  const fallbacks: Array<{ command: string; args: string[] }> = process.platform === "win32"
     ? [
         { command: "py", args: ["-3", "-m", "venv", venv] },
         { command: "python", args: ["-m", "venv", venv] },
@@ -148,6 +152,9 @@ async function createVenvIfMissing(cwd: string): Promise<{ created: boolean; err
         { command: "python3", args: ["-m", "venv", venv] },
         { command: "python", args: ["-m", "venv", venv] },
       ];
+  const candidates = bundled
+    ? [{ command: bundled, args: ["-m", "venv", venv] }, ...fallbacks]
+    : fallbacks;
 
   const errors: string[] = [];
   for (const candidate of candidates) {
@@ -244,6 +251,26 @@ function segmentUsesVenvInterpreter(segment: string): boolean {
   );
 }
 
+// The app-bundled interpreter (set via PI_PY_GUARD_BUNDLED_PYTHON and surfaced
+// to skills as $PI_BUNDLED_PYTHON). It carries heavy, app-managed skill deps
+// (ppt-master) that intentionally do NOT belong in a user's project .venv. A
+// segment whose interpreter IS this trusted bundled python is compliant — the
+// guard still blocks arbitrary global python, just not the app's own runtime.
+function bundledPythonTokens(): string[] {
+  const toks = ["$pi_bundled_python", "${pi_bundled_python}"];
+  const p = process.env.PI_PY_GUARD_BUNDLED_PYTHON;
+  if (p) toks.push(normalizeSlashes(p).toLowerCase());
+  return toks;
+}
+
+function segmentUsesBundledPython(segment: string): boolean {
+  const s = normalizeSlashes(segment).toLowerCase();
+  // Interpreter must be in command position (optionally quoted), so an unrelated
+  // mention elsewhere in the segment cannot exempt it.
+  const head = stripCommandWrappers(s.trim()).replace(/^["']/, "");
+  return bundledPythonTokens().some((t) => head.startsWith(t));
+}
+
 function commandHasPipInstall(segment: string): boolean {
   const s = normalizeSlashes(segment).toLowerCase();
   return (
@@ -324,9 +351,11 @@ function getBashViolation(command: string, cwd: string): string | undefined {
       return `Global/user Python installs are not allowed in this workspace. Use ${quoteForDisplay(venvDisplay.posix)} -m pip install <package> or ${quoteForDisplay(venvDisplay.windows)} -m pip install <package>.`;
     }
 
-    // A segment is compliant only if the venv is already active or it invokes
-    // the venv interpreter itself. Exemption is scoped to THIS segment.
-    if (venvActive || segmentUsesVenvInterpreter(segment)) continue;
+    // A segment is compliant if the venv is active, it invokes the venv
+    // interpreter, or it invokes the trusted app-bundled interpreter (which
+    // carries app-managed skill deps like ppt-master). Exemption is scoped to
+    // THIS segment.
+    if (venvActive || segmentUsesVenvInterpreter(segment) || segmentUsesBundledPython(segment)) continue;
 
     if (commandHasPipInstall(segment)) {
       return `Python dependencies must be installed into the project virtualenv (${venvDirName()}), not globally. Use ${quoteForDisplay(venvDisplay.posix)} -m pip install <package> or ${quoteForDisplay(venvDisplay.windows)} -m pip install <package>.`;
@@ -337,7 +366,10 @@ function getBashViolation(command: string, cwd: string): string | undefined {
     }
 
     if (commandRunsPythonScriptGlobally(segment)) {
-      return `Python in this workspace must run through the project virtualenv. Use ${quoteForDisplay(venvDisplay.posix)} script.py or ${quoteForDisplay(venvDisplay.windows)} script.py (activate ${venvDirName()} first for piped/heredoc input).`;
+      const bundledHint = process.env.PI_PY_GUARD_BUNDLED_PYTHON
+        ? ` App-bundled skills (e.g. ppt-master) may instead use the bundled interpreter "$PI_BUNDLED_PYTHON script.py".`
+        : "";
+      return `Python in this workspace must run through the project virtualenv. Use ${quoteForDisplay(venvDisplay.posix)} script.py or ${quoteForDisplay(venvDisplay.windows)} script.py (activate ${venvDirName()} first for piped/heredoc input).${bundledHint}`;
     }
 
     if (commandRunsPythonToolGlobally(segment)) {
@@ -355,7 +387,11 @@ function workspacePolicyPrompt(cwd: string): string {
 - Before creating or running Python scripts, ensure ${venvDirName()} exists.
 - Install dependencies only with the virtualenv Python, e.g. ${venvDisplay.posix} -m pip install <package> or ${venvDisplay.windows} -m pip install <package>.
 - Never use global pip installs, pip --user, sudo pip, pipx install, global python -m pip install, or uv pip install --system.
-- Python-based skills under .agents/skills or .pi/skills must also use this workspace virtualenv unless the user explicitly requests an isolated per-skill virtualenv.`;
+- Python-based skills under .agents/skills or .pi/skills must also use this workspace virtualenv unless the user explicitly requests an isolated per-skill virtualenv.${
+    process.env.PI_PY_GUARD_BUNDLED_PYTHON
+      ? `\n- App-bundled skills with pre-installed dependencies (e.g. ppt-master) run on the trusted bundled interpreter: invoke their scripts as \`$PI_BUNDLED_PYTHON <script>\` (this is allowed and needs no virtualenv or pip install).`
+      : ""
+  }`;
 }
 
 export default function (pi: ExtensionAPI) {

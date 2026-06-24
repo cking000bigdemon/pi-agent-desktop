@@ -62,6 +62,43 @@ function bundledNodeExe() {
 function bundledNpmCli() {
   return path.join(bundledNodeDir(), "node_modules", "npm", "bin", "npm-cli.js");
 }
+// Bundled relocatable Python (python-build-standalone, ppt-master deps
+// pre-installed). packaged: resources/python ; dev: vendor/python.
+function bundledPythonDir() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "python")
+    : path.join(__dirname, "..", "vendor", "python");
+}
+function bundledPythonExe() {
+  // install_only Windows build keeps python.exe at the dir root.
+  return path.join(bundledPythonDir(), isWindows ? "python.exe" : "bin/python3");
+}
+// PATH dirs to prepend so the bundled python + its console scripts resolve.
+// Empty when the bundled Python is absent (dev before `npm run seed:python`).
+function bundledPythonPathDirs() {
+  const exe = bundledPythonExe();
+  if (!fs.existsSync(exe)) return [];
+  const pyDir = bundledPythonDir();
+  return [pyDir, path.join(pyDir, isWindows ? "Scripts" : "bin")];
+}
+// Env vars that wire the bundled Python into the pi server's environment so the
+// python-workdir-guard extension can (a) create project .venvs FROM it (zero
+// system-Python dependency) and (b) allowlist it for app-bundled skills like
+// ppt-master — while still forcing the user's own project code through .venv.
+// Returns {} when the bundled Python is absent so the guard cleanly falls back
+// to a system Python.
+function bundledPythonGuardEnv() {
+  const exe = bundledPythonExe();
+  if (!fs.existsSync(exe)) return {};
+  return {
+    // Read by ppt-master's SKILL.md to invoke its scripts on the bundled python.
+    PI_BUNDLED_PYTHON: exe,
+    // python-workdir-guard: interpreter to create project .venv from.
+    PI_PY_GUARD_PYTHON: exe,
+    // python-workdir-guard: extra interpreter treated as venv-compliant.
+    PI_PY_GUARD_BUNDLED_PYTHON: exe,
+  };
+}
 function seedDir() {
   return path.join(resourcesBase(), app.isPackaged ? "runtime-seed" : "runtime-seed");
 }
@@ -296,10 +333,47 @@ const DEFAULT_SKILLS = [
   "wiki-query",
   "wiki-lint",
   "okf-visualizer",
+  "ppt-master",
 ];
 
 function skillsSeedDir() {
   return path.join(resourcesBase(), "skills-seed");
+}
+
+// Cheap content signature of a bundled skill tree: hash of (relpath|size|mtime)
+// over all files — STAT ONLY, no file-body reads. Used to skip the deep per-file
+// sync when the bundle is unchanged (critical for ppt-master's ~12k icon files,
+// where deep-diffing every launch would be far too slow). Bundle mtimes change
+// on reinstall/app-update and on a dev edit, so a real change always re-syncs.
+function skillBundleSignature(dir) {
+  const crypto = require("crypto");
+  const parts = [];
+  const walk = (d, rel) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      if (e.name === "__pycache__") continue;
+      const full = path.join(d, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        walk(full, r);
+      } else if (e.isFile()) {
+        if (e.name.endsWith(".pyc")) continue;
+        try {
+          const st = fs.statSync(full);
+          parts.push(`${r}|${st.size}|${Math.floor(st.mtimeMs)}`);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  };
+  walk(dir, "");
+  return crypto.createHash("md5").update(parts.join("\n")).digest("hex");
 }
 
 // Recursively copy `src` tree into `dst`, writing only files whose content
@@ -346,12 +420,35 @@ async function ensureBundledSkills() {
   await fs.promises.mkdir(dest, { recursive: true });
 
   let synced = 0;
+  let skipped = 0;
   for (const name of DEFAULT_SKILLS) {
     const s = path.join(seed, name);
     if (!fs.existsSync(s)) continue;
-    synced += syncSkillTree(s, path.join(dest, name));
+    const skillDest = path.join(dest, name);
+    // Fast path: skip the deep per-file diff when the bundle signature matches
+    // the one recorded at last deploy (.seed-version).
+    const sig = skillBundleSignature(s);
+    const stampFile = path.join(skillDest, ".seed-version");
+    let deployedSig = null;
+    try {
+      deployedSig = fs.readFileSync(stampFile, "utf8").trim();
+    } catch {
+      /* not deployed yet */
+    }
+    if (deployedSig === sig) {
+      skipped++;
+      continue;
+    }
+    const n = syncSkillTree(s, skillDest);
+    synced += n;
+    try {
+      fs.writeFileSync(stampFile, sig);
+    } catch (e) {
+      dbg(`failed to write ${stampFile}: ${(e && e.message) || e}`);
+    }
+    dbg(`synced skill ${name}: ${n} file(s)`);
   }
-  dbg(`ensureBundledSkills done; synced ${synced} file(s) to ${dest}`);
+  dbg(`ensureBundledSkills done; synced ${synced} file(s), ${skipped} skill(s) up-to-date, to ${dest}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -413,8 +510,13 @@ function startServer(port) {
         NODE_ENV: "production",
         PORT: String(port),
         HOSTNAME: "127.0.0.1",
-        // Prepend bundled node dir so agent tool subprocesses (node/npx) resolve here.
-        PATH: bundledNodeDir() + path.delimiter + (process.env.PATH || ""),
+        // Prepend bundled node + bundled python dirs so agent tool subprocesses
+        // (node/npx, and python for the guard / ppt-master) resolve to the
+        // bundled runtimes. PI_* python hints are added when vendor/python ships.
+        PATH: [bundledNodeDir(), ...bundledPythonPathDirs(), process.env.PATH || ""]
+          .filter(Boolean)
+          .join(path.delimiter),
+        ...bundledPythonGuardEnv(),
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

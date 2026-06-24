@@ -19,8 +19,11 @@ pi-web-desktop/
 │   ├── features/       # ★ 自定义能力的后端逻辑(可选,见「开发约束」)
 │   └── ui/             # ★ 自定义能力的前端页面(可选,见「开发约束」)
 ├── vendor/node/        # 内置 Node.js 运行时(node.exe + npm) → 打包进 resources/node   ← 构建输入
+├── vendor/python/      # 内置 Python(python-build-standalone + ppt-master 依赖预装) → resources/python ← 构建输入(npm run seed:python)
 ├── runtime-seed/       # @cking000/pi-web 的 npm 生产安装(含 .next) → 打包进 resources/runtime-seed ← 构建输入
-├── extensions-seed/    # 默认随装的 5 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
+├── extensions-seed/    # 默认随装的 6 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
+├── skills-seed/        # 默认随装的技能(wiki 系列 OKF + ppt-master,源码已入库) → resources/skills-seed → ~/.pi/agent/skills
+├── scripts/            # seed-python.ps1 + vendor-python-requirements.txt(供给 vendor/python)
 ├── build/              # 应用图标(icon.svg / icon.png / icon.ico)
 ├── electron-builder.yml
 └── package.json
@@ -76,9 +79,20 @@ npm run seed:extensions
 # 3. 准备内置 Node 运行时(win-x64)
 #    下载 node-v22.12.0-win-x64.zip 解压为 vendor/node(含 node.exe + npm)
 #    例:https://registry.npmmirror.com/-/binary/node/v22.12.0/node-v22.12.0-win-x64.zip
+
+# 4. 准备内置 Python(win-x64,ppt-master 依赖预装,~340MB)
+#    下载 python-build-standalone(install_only)解压为 vendor/python,并把
+#    scripts/vendor-python-requirements.txt 装进去。全自动:
+npm run seed:python
 ```
 
 > 之后只需 `npm run seed` 把运行时种子升到最新发布版再打包。
+>
+> **内置 Python 的作用**:让打包后的 app 跑 Python 技能做到「装完即用、零依赖」——
+> `electron/main.js` 把 `vendor/python` 注入 pi 服务进程环境:`python-workdir-guard`
+> 用它创建项目 `.venv`(无需系统 Python),并放行它(`$PI_BUNDLED_PYTHON`)给随装技能
+> `ppt-master` 直接使用(其重依赖已预装在内置 Python,离线零 pip)。用户自己的项目
+> 代码仍被守卫强制走干净的 `.venv`。
 
 ## 开发 / 运行
 
@@ -99,7 +113,7 @@ npm start
 
 ## 打包安装程序
 
-确保 `build/icon.ico` 存在,且 `vendor/node`、`runtime-seed`、`extensions-seed`(其 `node_modules` 跑 `npm run seed:extensions` 准备)已准备好,然后:
+确保 `build/icon.ico` 存在,且 `vendor/node`、`vendor/python`(`npm run seed:python`)、`runtime-seed`、`extensions-seed`(其 `node_modules` 跑 `npm run seed:extensions` 准备)已准备好,然后:
 
 ```bash
 npm run dist        # 生成 dist/Pi Agent Setup x.x.x.exe (NSIS)
