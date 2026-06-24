@@ -276,6 +276,85 @@ async function ensureBundledExtensions() {
 }
 
 // ---------------------------------------------------------------------------
+// Bundled skills sync (repo skills-seed/ is the source of truth)
+// ---------------------------------------------------------------------------
+// The OKF knowledge skills ship with the app so a fresh install has them active
+// out of the box in ~/.pi/agent/skills/ (pi auto-discovers skills there, so they
+// work in EVERY workspace). The repo's `skills-seed/` is their CANONICAL SOURCE —
+// developed there, never hand-edited in the data dir. On every launch we sync each
+// managed skill DIRECTORY into ~/.pi/agent/skills/<name>/: any file whose content
+// differs from the bundle is (over)written, which is what makes the "edit in the
+// repo -> reinstall (or re-run) loop" deploy changes. These skills are pure
+// stdlib Python (no node_modules, no pip deps).
+//
+// Only these managed skill names are touched (any other skill in the dir is left
+// alone). Files under __pycache__/ and *.pyc are never deployed. Any failure here
+// is logged and swallowed so it can never block boot.
+const DEFAULT_SKILLS = [
+  "wiki-init",
+  "wiki-compile",
+  "wiki-query",
+  "wiki-lint",
+  "okf-visualizer",
+];
+
+function skillsSeedDir() {
+  return path.join(resourcesBase(), "skills-seed");
+}
+
+// Recursively copy `src` tree into `dst`, writing only files whose content
+// differs (no churn). Skips __pycache__ dirs and *.pyc. Does not prune files
+// removed from the seed (rare; harmless — mirrors the extensions seed policy).
+// Returns the number of files written.
+function syncSkillTree(src, dst) {
+  let written = 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(src, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  fs.mkdirSync(dst, { recursive: true });
+  for (const ent of entries) {
+    if (ent.isDirectory()) {
+      if (ent.name === "__pycache__") continue;
+      written += syncSkillTree(path.join(src, ent.name), path.join(dst, ent.name));
+    } else if (ent.isFile()) {
+      if (ent.name.endsWith(".pyc")) continue;
+      const s = path.join(src, ent.name);
+      const d = path.join(dst, ent.name);
+      if (sameContent(s, d)) continue;
+      try {
+        fs.mkdirSync(path.dirname(d), { recursive: true });
+        fs.copyFileSync(s, d);
+        written++;
+      } catch (e) {
+        dbg(`failed to sync skill file ${d}: ${(e && e.message) || e}`);
+      }
+    }
+  }
+  return written;
+}
+
+async function ensureBundledSkills() {
+  const seed = skillsSeedDir();
+  if (!fs.existsSync(seed)) {
+    dbg(`skills seed missing at ${seed} — skipping skill sync`);
+    return;
+  }
+  const dest = path.join(piAgentDir(), "skills");
+  await fs.promises.mkdir(dest, { recursive: true });
+
+  let synced = 0;
+  for (const name of DEFAULT_SKILLS) {
+    const s = path.join(seed, name);
+    if (!fs.existsSync(s)) continue;
+    synced += syncSkillTree(s, path.join(dest, name));
+  }
+  dbg(`ensureBundledSkills done; synced ${synced} file(s) to ${dest}`);
+}
+
+// ---------------------------------------------------------------------------
 // Server process management
 // ---------------------------------------------------------------------------
 let serverProc = null;
@@ -652,6 +731,13 @@ async function boot() {
       await ensureBundledExtensions();
     } catch (e) {
       dbg(`ensureBundledExtensions error (non-fatal): ${(e && e.stack) || e}`);
+    }
+    // Sync the bundled OKF knowledge skills (repo skills-seed/ is the source of
+    // truth) into ~/.pi/agent/skills/. Non-fatal: never block boot.
+    try {
+      await ensureBundledSkills();
+    } catch (e) {
+      dbg(`ensureBundledSkills error (non-fatal): ${(e && e.stack) || e}`);
     }
     await startOrRestartServer();
     dbg("startOrRestartServer returned ok");

@@ -31,6 +31,15 @@ extraResources:
     filter:
       - "**/*"
       - "!**/*.map"
+  # Default OKF knowledge skills (wiki-init/compile/query/lint + okf-visualizer).
+  # Pure-stdlib Python; copied into ~/.pi/agent/skills/ on first run (see
+  # ensureBundledSkills in main.js). __pycache__ / *.pyc are excluded from the bundle.
+  - from: skills-seed
+    to: skills-seed
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
 
 win:
   target:

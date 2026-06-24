@@ -13,6 +13,10 @@ runtime-seed/
 # Legacy v1 source clone (no longer used at runtime)
 pi-web/
 
+# Python bytecode — skills-seed scripts ARE committed; their caches are not
+__pycache__/
+*.pyc
+
 # OS / editor
 .DS_Store
 Thumbs.db
