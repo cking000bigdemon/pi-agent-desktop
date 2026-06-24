@@ -48,27 +48,36 @@ def parse_frontmatter(text: str):
 
 
 def link_targets(body: str, link_style: str):
-    if link_style == "wikilink":
-        for mo in _WIKILINK.finditer(body):
-            t = mo.group(1).strip()
-            if "/" not in t:
-                yield t
-    else:
-        for mo in _MDLINK.finditer(body):
-            dest = mo.group(1).strip()
-            if dest.startswith(("http://", "https://", "mailto:", "#")):
-                continue
-            if dest.startswith("<"):
-                dest = dest[1:].split(">", 1)[0]
-            tm = _MD_TITLE.match(dest)
-            if tm:
-                dest = tm.group(1)
-            dest = dest.split("#", 1)[0].strip()
-            base = os.path.basename(dest)
-            if base.endswith(".md"):
-                base = base[:-3]
-            if base:
-                yield base
+    """Yield concept-link target basenames. Parses BOTH wikilink and markdown
+    forms (mutually exclusive on real content), so the graph is dialect-agnostic
+    and finds edges whether the bundle was compiled okf-pure or obsidian — even
+    when no okf.config.json pins link_style. `link_style` is accepted for
+    signature compatibility but no longer gates which form is read."""
+    seen = set()
+    # Obsidian wikilinks: [[Target]] / [[Target#h]] / [[Target|alias]]
+    for mo in _WIKILINK.finditer(body):
+        t = mo.group(1).strip()
+        if "/" in t or not t or t in seen:
+            continue
+        seen.add(t)
+        yield t
+    # Markdown links: [text](path.md)
+    for mo in _MDLINK.finditer(body):
+        dest = mo.group(1).strip()
+        if dest.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        if dest.startswith("<"):
+            dest = dest[1:].split(">", 1)[0]
+        tm = _MD_TITLE.match(dest)
+        if tm:
+            dest = tm.group(1)
+        dest = dest.split("#", 1)[0].strip()
+        base = os.path.basename(dest)
+        if base.endswith(".md"):
+            base = base[:-3]
+        if base and base not in seen:
+            seen.add(base)
+            yield base
 
 
 def build_graph(cfg) -> dict:
@@ -147,46 +156,77 @@ const PAL=["#0050EF","#00A300","#E3C800","#A20025","#AA00FF","#1BA1E2","#F09609"
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
 const domColor={};DATA.domains.forEach((d,i)=>domColor[d]=PAL[i%PAL.length]);
 const off={};DATA.domains.forEach(d=>off[d]=false);
-let nodes=DATA.nodes.map((n,i)=>({...n,x:Math.cos(i)*200+ (Math.random()*40),y:Math.sin(i)*200+(Math.random()*40),vx:0,vy:0}));
+const N=DATA.nodes.length;
+let nodes=DATA.nodes.map((n,i)=>{const a=i/Math.max(1,N)*6.283, R=110+Math.sqrt(i)*20;
+  return {...n,x:Math.cos(a)*R,y:Math.sin(a)*R,vx:0,vy:0};});
 const byId={};nodes.forEach(n=>byId[n.id]=n);
 const edges=DATA.edges.filter(e=>byId[e.s]&&byId[e.t]);
-let view={x:0,y:0,k:1},sel=null,filter="";
-let W=0,H=0;function resize(){W=cv.width=cv.clientWidth*devicePixelRatio;H=cv.height=cv.clientHeight*devicePixelRatio;}
-new ResizeObserver(resize).observe(cv);resize();
-document.getElementById('stat').textContent=nodes.length+" concepts · "+edges.length+" links";
+let view={x:0,y:0,k:1},sel=null,filter="",drag=null,pan=null,frame=0,fitted=false;
+const dpr=()=>window.devicePixelRatio||1;
+// Coordinates are in CSS pixels; the context is dpr-scaled per frame (setTransform).
+let W=0,H=0;
+function resize(){const r=cv.getBoundingClientRect();W=Math.max(1,Math.round(r.width));H=Math.max(1,Math.round(r.height));cv.width=Math.round(W*dpr());cv.height=Math.round(H*dpr());fitted=false;}
+try{new ResizeObserver(resize).observe(cv);}catch(e){}
+window.addEventListener('resize',resize);resize();
+document.getElementById('stat').textContent=N+" concepts · "+edges.length+" links";
 // legend
 const leg=document.getElementById('legend');
 DATA.domains.forEach(d=>{const el=document.createElement('div');el.className='leg';
 el.innerHTML='<span class="sw" style="background:'+domColor[d]+'"></span>'+d+' ('+nodes.filter(n=>n.domain===d).length+')';
 el.onclick=()=>{off[d]=!off[d];el.classList.toggle('off',off[d]);};leg.appendChild(el);});
 document.getElementById('search').oninput=e=>{filter=e.target.value.trim().toLowerCase();};
-function visible(n){if(off[n.domain])return false;if(filter&&!n.id.toLowerCase().includes(filter))return false;return true;}
-// force sim
-function step(){const k=0.02,rep=2400;
-for(const a of nodes){a.vx*=0.86;a.vy*=0.86;
-for(const b of nodes){if(a===b)continue;let dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy+0.01;let f=rep/d2;a.vx+=dx*f*0.001;a.vy+=dy*f*0.001;}
-a.vx+=-a.x*0.0008;a.vy+=-a.y*0.0008;}
-for(const e of edges){const a=byId[e.s],b=byId[e.t];let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||1;let f=(d-90)*k;a.vx+=dx/d*f;a.vy+=dy/d*f;b.vx-=dx/d*f;b.vy-=dy/d*f;}
-for(const n of nodes){if(n===drag)continue;n.x+=n.vx;n.y+=n.vy;}}
-function toScr(n){return{x:n.x*view.k+view.x+W/2,y:n.y*view.k+view.y+H/2};}
-function draw(){ctx.clearRect(0,0,W,H);ctx.lineWidth=devicePixelRatio;
-ctx.strokeStyle="rgba(255,255,255,0.08)";
-for(const e of edges){const a=byId[e.s],b=byId[e.t];if(!visible(a)||!visible(b))continue;
-const pa=toScr(a),pb=toScr(b);ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);ctx.stroke();}
-for(const n of nodes){if(!visible(n))continue;const p=toScr(n);const r=(5+n.deg*1.5)*view.k*devicePixelRatio;
-ctx.beginPath();ctx.arc(p.x,p.y,r,0,7);ctx.fillStyle=domColor[n.domain]||"#888";ctx.fill();
-if(n===sel){ctx.lineWidth=2*devicePixelRatio;ctx.strokeStyle="#fff";ctx.stroke();}
-if(view.k>0.7||n===sel){ctx.fillStyle="#ddd";ctx.font=(11*devicePixelRatio)+"px Segoe UI";ctx.fillText(n.id,p.x+r+2,p.y+4);}}}
-function loop(){step();draw();requestAnimationFrame(loop);}loop();
-// interaction
-let drag=null,pan=null;
-function pick(mx,my){let best=null,bd=1e9;for(const n of nodes){if(!visible(n))continue;const p=toScr(n);const d=(p.x-mx)**2+(p.y-my)**2;const r=((8+n.deg*1.5)*view.k*devicePixelRatio)**2;if(d<r&&d<bd){bd=d;best=n;}}return best;}
-cv.addEventListener('mousedown',e=>{const mx=e.offsetX*devicePixelRatio,my=e.offsetY*devicePixelRatio;const n=pick(mx,my);if(n){drag=n;sel=n;showDetail(n);}else{pan={x:e.clientX,y:e.clientY,vx:view.x,vy:view.y};}});
-window.addEventListener('mousemove',e=>{if(drag){drag.x=(e.offsetX*devicePixelRatio-view.x-W/2)/view.k;drag.y=(e.offsetY*devicePixelRatio-H/2-view.y)/view.k;drag.vx=drag.vy=0;}else if(pan){view.x=pan.vx+(e.clientX-pan.x)*devicePixelRatio;view.y=pan.vy+(e.clientY-pan.y)*devicePixelRatio;}});
+function visible(n){if(off[n.domain])return false;if(filter&&!String(n.id).toLowerCase().includes(filter))return false;return true;}
+function fin(v){return Number.isFinite(v)?v:0;}
+// force sim — clamped + center gravity so it can't fling nodes off-screen
+function step(){
+  const rep=1600,spring=0.045,grav=0.015,damp=0.85,maxV=28;
+  for(const a of nodes){a.vx*=damp;a.vy*=damp;}
+  for(let i=0;i<N;i++){const a=nodes[i];
+    for(let j=i+1;j<N;j++){const b=nodes[j];
+      let dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy;if(d2<1)d2=1;
+      const inv=1/Math.sqrt(d2),f=rep/d2*0.02,fx=dx*inv*f,fy=dy*inv*f;
+      a.vx+=fx;a.vy+=fy;b.vx-=fx;b.vy-=fy;}}
+  for(const e of edges){const a=byId[e.s],b=byId[e.t];
+    let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||1;
+    const f=(d-70)*spring,fx=dx/d*f,fy=dy/d*f;
+    a.vx+=fx;a.vy+=fy;b.vx-=fx;b.vy-=fy;}
+  for(const n of nodes){n.vx-=n.x*grav;n.vy-=n.y*grav;
+    if(n.vx>maxV)n.vx=maxV;else if(n.vx<-maxV)n.vx=-maxV;
+    if(n.vy>maxV)n.vy=maxV;else if(n.vy<-maxV)n.vy=-maxV;
+    if(n===drag)continue;n.x=fin(n.x+n.vx);n.y=fin(n.y+n.vy);}
+}
+// auto-fit the settled layout into the viewport (so nodes are always visible)
+function fitView(){
+  let minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9,any=false;
+  for(const n of nodes){if(!visible(n))continue;any=true;
+    if(n.x<minx)minx=n.x;if(n.x>maxx)maxx=n.x;if(n.y<miny)miny=n.y;if(n.y>maxy)maxy=n.y;}
+  if(!any)return;
+  const gw=Math.max(1,maxx-minx),gh=Math.max(1,maxy-miny);
+  view.k=Math.max(0.2,Math.min(W/(gw+120),H/(gh+120),2));
+  view.x=W/2-((minx+maxx)/2)*view.k;view.y=H/2-((miny+maxy)/2)*view.k;
+}
+function toScr(n){return{x:n.x*view.k+view.x,y:n.y*view.k+view.y};}
+function draw(){
+  ctx.setTransform(dpr(),0,0,dpr(),0,0);
+  ctx.clearRect(0,0,W,H);
+  ctx.lineWidth=1;ctx.strokeStyle="rgba(255,255,255,0.10)";
+  for(const e of edges){const a=byId[e.s],b=byId[e.t];if(!visible(a)||!visible(b))continue;
+    const pa=toScr(a),pb=toScr(b);ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);ctx.stroke();}
+  for(const n of nodes){if(!visible(n))continue;const p=toScr(n);const r=(4+n.deg*1.2)*Math.max(0.5,view.k);
+    ctx.beginPath();ctx.arc(p.x,p.y,r,0,6.283);ctx.fillStyle=domColor[n.domain]||"#888";ctx.fill();
+    if(n===sel){ctx.lineWidth=2;ctx.strokeStyle="#fff";ctx.stroke();}
+    if(view.k>0.55||n===sel){ctx.fillStyle="#ddd";ctx.font="11px Segoe UI";ctx.fillText(String(n.id),p.x+r+3,p.y+4);}}
+}
+function loop(){try{step();frame++;if(frame===70&&!fitted){fitView();fitted=true;}draw();}catch(e){}requestAnimationFrame(loop);}
+loop();
+// interaction (CSS-pixel coordinates throughout)
+function pick(mx,my){let best=null,bd=1e9;for(const n of nodes){if(!visible(n))continue;const p=toScr(n);const d=(p.x-mx)**2+(p.y-my)**2;const r=((8+n.deg*1.2)*Math.max(0.5,view.k))**2;if(d<r&&d<bd){bd=d;best=n;}}return best;}
+cv.addEventListener('mousedown',e=>{const mx=e.offsetX,my=e.offsetY;const n=pick(mx,my);if(n){drag=n;sel=n;showDetail(n);}else{pan={x:e.clientX,y:e.clientY,vx:view.x,vy:view.y};}});
+window.addEventListener('mousemove',e=>{if(drag){drag.x=(e.offsetX-view.x)/view.k;drag.y=(e.offsetY-view.y)/view.k;drag.vx=drag.vy=0;}else if(pan){view.x=pan.vx+(e.clientX-pan.x);view.y=pan.vy+(e.clientY-pan.y);}});
 window.addEventListener('mouseup',()=>{drag=null;pan=null;});
-cv.addEventListener('wheel',e=>{e.preventDefault();const f=e.deltaY<0?1.1:0.9;view.k=Math.max(0.15,Math.min(4,view.k*f));},{passive:false});
-function showDetail(n){const d=document.getElementById('detail');let s='';if(n.sources&&n.sources.length){s='<ul>'+n.sources.map(x=>'<li>'+x.replace(/[<>]/g,'')+'</li>').join('')+'</ul>';}
-d.style.display='block';d.innerHTML='<h2>'+n.id+'</h2><div class="d">'+(n.desc||'(no description)')+'</div><div class="d" style="margin-top:8px">domain: <b style="color:'+(domColor[n.domain]||'#888')+'">'+n.domain+'</b> · '+n.deg+' links</div>'+(s?'<div class="d" style="margin-top:8px">sources:</div>'+s:'');}
+cv.addEventListener('wheel',e=>{e.preventDefault();const f=e.deltaY<0?1.1:0.9;const mx=e.offsetX,my=e.offsetY;const k2=Math.max(0.15,Math.min(4,view.k*f));view.x=mx-(mx-view.x)*(k2/view.k);view.y=my-(my-view.y)*(k2/view.k);view.k=k2;},{passive:false});
+function showDetail(n){const d=document.getElementById('detail');let s='';if(n.sources&&n.sources.length){s='<ul>'+n.sources.map(x=>'<li>'+String(x).replace(/[<>]/g,'')+'</li>').join('')+'</ul>';}
+d.style.display='block';d.innerHTML='<h2>'+String(n.id)+'</h2><div class="d">'+(n.desc||'(no description)')+'</div><div class="d" style="margin-top:8px">domain: <b style="color:'+(domColor[n.domain]||'#888')+'">'+n.domain+'</b> · '+n.deg+' links</div>'+(s?'<div class="d" style="margin-top:8px">sources:</div>'+s:'');}
 </script></body></html>"""
 
 

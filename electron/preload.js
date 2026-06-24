@@ -357,6 +357,8 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     bs.borderTop = "1px solid var(--border, rgba(0,0,0,0.06))";
     bs.pointerEvents = "none"; // only the chips are interactive (set below)
 
+    // Left-aligned (marginRight:auto) — the active workspace's OKF knowledge base.
+    bar.appendChild(buildWikiChip());
     bar.appendChild(buildTotalChip());
     bar.appendChild(buildSep());
     bar.appendChild(buildChip("mcp", "MCP"));
@@ -541,6 +543,59 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     return chip;
   }
 
+  // Wiki chip: concept count of the ACTIVE workspace's OKF knowledge base.
+  // Clicking opens a popover (domain breakdown + "打开知识图谱" action). Left-
+  // aligned via marginRight:auto so it sits opposite the right-hand chip group.
+  function buildWikiChip() {
+    const category = "wiki";
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.setAttribute("aria-label", "知识库（OKF）");
+    const cs = chip.style;
+    cs.pointerEvents = "auto";
+    cs.marginRight = "auto"; // push the rest of the bar to the right
+    cs.display = "flex";
+    cs.alignItems = "center";
+    cs.gap = "6px";
+    cs.cursor = "pointer";
+    cs.border = "none";
+    cs.background = "transparent";
+    cs.color = "var(--text, #1a1a1a)";
+    cs.fontFamily = UI;
+    cs.fontSize = "12px";
+    cs.lineHeight = "1";
+    cs.padding = "5px 8px";
+    cs.borderRadius = "0";
+    cs.transition = "background .15s ease";
+    chip.addEventListener(
+      "mouseenter",
+      () => (chip.style.background = "color-mix(in srgb, var(--text, #1a1a1a) 8%, transparent)")
+    );
+    chip.addEventListener("mouseleave", () => {
+      if (openCategory !== category) chip.style.background = "transparent";
+    });
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePopover(category);
+    });
+
+    const name = document.createElement("span");
+    name.textContent = "Wiki";
+    name.style.color = "var(--text-muted, #6b7280)";
+    name.style.marginRight = "2px";
+
+    const val = document.createElement("span");
+    val.textContent = "–";
+    val.style.color = "var(--accent, #0050EF)";
+    val.style.fontWeight = "600";
+    val.style.fontVariantNumeric = "tabular-nums";
+
+    chip.appendChild(name);
+    chip.appendChild(val);
+    chips.wiki = { el: chip, val };
+    return chip;
+  }
+
   function counts(cat) {
     const group = status && status[cat];
     return {
@@ -606,6 +661,16 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
           `本次启动已完成 ${done} 个${failed ? `，失败 ${failed} 个` : ""}`
         : "子会话（sub-agent）运行状态";
     }
+    if (chips.wiki) {
+      const w = (status && status.wiki) || null;
+      const present = !!(w && w.present);
+      chips.wiki.val.textContent = present ? String(w.concepts || 0) : "0";
+      chips.wiki.val.style.opacity = present ? "1" : "0.4";
+      chips.wiki.el.title = present
+        ? `知识库（OKF）：${w.concepts} 个概念 · ${(w.domains || []).length} 个业务域\n` +
+          `工作区 ${w.cwd || ""}`
+        : "当前工作区无 OKF 知识库（在 pi 里 /wiki-init + /wiki-compile 生成）";
+    }
   }
 
   // --- the bottom-right popover ---
@@ -619,7 +684,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 
   function openPopover(category) {
     openCategory = category;
-    for (const cat of ["mcp", "extensions", "subagents"]) {
+    for (const cat of ["mcp", "extensions", "subagents", "wiki"]) {
       if (chips[cat]) {
         chips[cat].el.style.background =
           cat === category ? "color-mix(in srgb, var(--text, #1a1a1a) 8%, transparent)" : "transparent";
@@ -634,7 +699,7 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 
   function closePopover() {
     openCategory = null;
-    for (const cat of ["mcp", "extensions", "subagents"]) {
+    for (const cat of ["mcp", "extensions", "subagents", "wiki"]) {
       if (chips[cat]) chips[cat].el.style.background = "transparent";
     }
     if (popover) {
@@ -679,7 +744,14 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     cs.transition = "opacity .18s ease, transform .22s cubic-bezier(0.1,0.9,0.2,1)";
 
     const data = (status && status[category]) || { active: [], inactive: [] };
-    const title = category === "mcp" ? "MCP" : category === "subagents" ? "Sub-agents" : "Extensions";
+    const title =
+      category === "mcp"
+        ? "MCP"
+        : category === "subagents"
+          ? "Sub-agents"
+          : category === "wiki"
+            ? "知识库（OKF）"
+            : "Extensions";
 
     // header
     const head = document.createElement("div");
@@ -723,6 +795,8 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 
     if (category === "subagents") {
       appendSubagentSections(card);
+    } else if (category === "wiki") {
+      appendWikiSection(card);
     } else {
       card.appendChild(buildSection("已激活", GREEN, data.active, category));
       card.appendChild(buildSection("暂未激活", RED, data.inactive, category));
@@ -942,6 +1016,72 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
       }
     }
     card.appendChild(doneWrap);
+  }
+
+  // --- wiki popover body: domain breakdown + "open graph" action ---
+  function appendWikiSection(card) {
+    const w = (status && status.wiki) || { present: false };
+
+    if (!w.present) {
+      const empty = document.createElement("div");
+      empty.style.color = "var(--text-dim, #9ca3af)";
+      empty.style.fontSize = "12.5px";
+      empty.style.lineHeight = "1.6";
+      empty.style.padding = "2px 0 4px";
+      empty.textContent = w.cwd
+        ? "当前工作区还没有 OKF 知识库。在 pi 里运行 /wiki-init，再 /wiki-compile 生成。"
+        : "未检测到活动工作区。";
+      card.appendChild(empty);
+      return;
+    }
+
+    const sum = document.createElement("div");
+    sum.style.marginBottom = "10px";
+    sum.style.fontSize = "12.5px";
+    sum.style.color = "var(--text-muted, #6b7280)";
+    sum.textContent = `${w.concepts} 个概念 · ${(w.domains || []).length} 个业务域`;
+    card.appendChild(sum);
+
+    const wrap = document.createElement("div");
+    wrap.style.marginBottom = "12px";
+    wrap.appendChild(sectionHeading("业务域", GREEN, (w.domains || []).length));
+    if (!w.domains || w.domains.length === 0) {
+      wrap.appendChild(emptyRow("无（运行 /wiki-compile 生成概念）"));
+    } else {
+      for (const d of w.domains) {
+        wrap.appendChild(subagentRow({ name: d.name, tag: String(d.count) }));
+      }
+    }
+    card.appendChild(wrap);
+
+    const act = document.createElement("button");
+    act.type = "button";
+    act.textContent = w.graphExists ? "打开知识图谱（重新生成）" : "打开知识图谱";
+    const as = act.style;
+    as.width = "100%";
+    as.cursor = "pointer";
+    as.padding = "9px 12px";
+    as.border = "none";
+    as.borderRadius = "0";
+    as.background = "var(--accent, #0050EF)";
+    as.color = "#ffffff";
+    as.fontFamily = UI;
+    as.fontSize = "12.5px";
+    as.fontWeight = "600";
+    as.letterSpacing = "0.3px";
+    act.addEventListener("mouseenter", () => (act.style.background = "var(--accent-hover, #2F6BFF)"));
+    act.addEventListener("mouseleave", () => (act.style.background = "var(--accent, #0050EF)"));
+    act.addEventListener("click", (e) => {
+      e.stopPropagation();
+      act.disabled = true;
+      act.textContent = "正在生成图谱…";
+      act.style.opacity = "0.75";
+      act.style.cursor = "default";
+      ipcRenderer.send("pi-web-desktop:open-okf-graph");
+      // The graph opens in a separate window from the main process; tidy up here.
+      setTimeout(() => closePopover(), 700);
+    });
+    card.appendChild(act);
   }
 
   // --- data + lifecycle ---

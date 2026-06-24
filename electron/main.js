@@ -733,6 +733,76 @@ ipcMain.on("pi-web-desktop:apply-update", () => {
   applyUpdate(ctx, installed, lastKnownLatest, true).catch(() => {});
 });
 
+// Dashboard action: user clicked "打开知识图谱" in the wiki popover. Generate the
+// OKF graph for the ACTIVE workspace with the bundled Python (the okf-visualizer
+// skill's build_visualizer.py), then open the self-contained HTML in a standalone
+// in-app window (reused across opens). Non-fatal; logs and returns on any miss.
+let okfGraphWin = null;
+ipcMain.on("pi-web-desktop:open-okf-graph", async () => {
+  try {
+    const cwd = dashboard.activeCwd();
+    if (!cwd) {
+      dbg("open-okf-graph: no active workspace cwd");
+      return;
+    }
+    let bundleDir = "wiki";
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(cwd, "okf.config.json"), "utf8"));
+      if (cfg && typeof cfg.bundle_dir === "string" && cfg.bundle_dir.trim()) bundleDir = cfg.bundle_dir;
+    } catch {
+      /* no config — default bundle dir */
+    }
+    const py = bundledPythonExe();
+    const script = path.join(piAgentDir(), "skills", "okf-visualizer", "scripts", "build_visualizer.py");
+    if (!fs.existsSync(py) || !fs.existsSync(script)) {
+      dbg(`open-okf-graph: missing py=${fs.existsSync(py)} script=${fs.existsSync(script)}`);
+      return;
+    }
+    await new Promise((resolve) => {
+      const p = spawn(py, [script, "--vault", cwd], {
+        windowsHide: true,
+        env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+      });
+      let err = "";
+      p.stderr.on("data", (d) => (err += d.toString()));
+      p.on("error", (e) => {
+        dbg(`open-okf-graph spawn error ${e.message}`);
+        resolve();
+      });
+      p.on("exit", (code) => {
+        if (code !== 0) dbg(`build_visualizer exit ${code}: ${err.slice(-300)}`);
+        resolve();
+      });
+    });
+    const htmlPath = path.join(cwd, bundleDir, "okf-graph.html");
+    if (!fs.existsSync(htmlPath)) {
+      dbg(`open-okf-graph: graph not generated at ${htmlPath}`);
+      return;
+    }
+    if (okfGraphWin && !okfGraphWin.isDestroyed()) {
+      okfGraphWin.loadFile(htmlPath);
+      okfGraphWin.focus();
+      return;
+    }
+    okfGraphWin = new BrowserWindow({
+      width: 1100,
+      height: 760,
+      title: "OKF 知识图谱",
+      backgroundColor: "#0A0A0A",
+      autoHideMenuBar: true,
+      webPreferences: { contextIsolation: true, nodeIntegration: false },
+    });
+    okfGraphWin.on("closed", () => {
+      okfGraphWin = null;
+    });
+    okfGraphWin.loadFile(htmlPath);
+    if (process.env.PI_OKF_DEVTOOLS) okfGraphWin.webContents.openDevTools({ mode: "bottom" });
+    dbg(`open-okf-graph: opened ${htmlPath}`);
+  } catch (e) {
+    dbg(`open-okf-graph error ${(e && e.stack) || e}`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Dashboard (MCP / extensions activation status)
 // ---------------------------------------------------------------------------

@@ -348,6 +348,76 @@ function readTokenUsage(sessionsDir, sinceMs) {
 }
 
 // ---------------------------------------------------------------------------
+// Active workspace + wiki (OKF) bundle
+// ---------------------------------------------------------------------------
+// The dashboard reads ~/.pi (global), but the OKF knowledge bundle is PER
+// WORKSPACE (<cwd>/<bundle>/). pi-web doesn't expose its cwd to the shell, so we
+// recover the active workspace from the most-recently-touched session JSONL,
+// which records `"cwd":"..."`. This matches the workspace the user is in without
+// coupling to pi-web's DOM.
+function activeCwd() {
+  const { agentDir } = paths();
+  const sessionsDir = path.join(agentDir, "sessions");
+  const files = [];
+  collectJsonl(sessionsDir, files, 0);
+  let newest = null;
+  let newestMs = 0;
+  for (const f of files) {
+    try {
+      const m = fs.statSync(f).mtimeMs;
+      if (m > newestMs) {
+        newestMs = m;
+        newest = f;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!newest) return null;
+  try {
+    const text = fs.readFileSync(newest, "utf8");
+    const m = text.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (m) return JSON.parse('"' + m[1] + '"'); // unescape JSON string body
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** Read the active workspace's OKF bundle summary (concept count + domains). */
+function readWiki(cwd) {
+  if (!cwd) return { present: false };
+  let bundleDir = "wiki";
+  const cfg = readJson(path.join(cwd, "okf.config.json"));
+  if (cfg && typeof cfg.bundle_dir === "string" && cfg.bundle_dir.trim()) {
+    bundleDir = cfg.bundle_dir;
+  }
+  const bundlePath = path.join(cwd, bundleDir);
+  const meta = readJson(path.join(bundlePath, "_meta.json"));
+  if (!meta) return { present: false, cwd, bundleDir };
+  const stats = meta.compile_stats || {};
+  const domainsObj = stats.domains && typeof stats.domains === "object" ? stats.domains : {};
+  const domains = Object.entries(domainsObj)
+    .map(([name, count]) => ({ name, count: num(count) }))
+    .sort((a, b) => b.count - a.count);
+  const concepts =
+    stats.total_concepts != null
+      ? num(stats.total_concepts)
+      : meta.concepts
+        ? Object.keys(meta.concepts).length
+        : 0;
+  return {
+    present: true,
+    cwd,
+    bundleDir,
+    concepts,
+    domains,
+    lastCompile: meta.last_compile || null,
+    graphExists: fileExists(path.join(bundlePath, "okf-graph.html")),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Public
 // ---------------------------------------------------------------------------
 /**
@@ -367,6 +437,7 @@ async function readStatus(opts) {
   let extensions = { active: [], inactive: [] };
   let tokens = { total: 0, input: 0, output: 0, calls: 0, sessions: 0, sinceMs: opts.sinceMs || 0 };
   let subs = { running: 0, runningList: [], doneSession: 0, failedSession: 0, recent: [] };
+  let wiki = { present: false };
   try {
     mcp = readMcp(mcpConfigPath);
   } catch (e) {
@@ -388,14 +459,22 @@ async function readStatus(opts) {
   } catch (e) {
     error = (error ? error + "; " : "") + `子会话统计失败: ${(e && e.message) || e}`;
   }
+  let cwd = null;
+  try {
+    cwd = activeCwd();
+    wiki = readWiki(cwd);
+  } catch (e) {
+    error = (error ? error + "; " : "") + `wiki 读取失败: ${(e && e.message) || e}`;
+  }
   return {
     mcp,
     extensions,
     tokens,
     subagents: subs,
-    source: { agentDir, mcpConfigPath, extensionsDir, sessionsDir },
+    wiki,
+    source: { agentDir, mcpConfigPath, extensionsDir, sessionsDir, cwd },
     error,
   };
 }
 
-module.exports = { readStatus };
+module.exports = { readStatus, activeCwd };
