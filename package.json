@@ -8,7 +8,7 @@
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
-    "seed": "cd runtime-seed && npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com",
+    "seed": "cd runtime-seed && npm install @cking000/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com",
     "seed:extensions": "cd extensions-seed && npm ci --omit=dev --registry=https://registry.npmmirror.com",
     "seed:python": "powershell -ExecutionPolicy Bypass -File scripts/seed-python.ps1",
     "dist": "electron-builder",
