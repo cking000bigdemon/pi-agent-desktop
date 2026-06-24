@@ -161,11 +161,11 @@ let nodes=DATA.nodes.map((n,i)=>{const a=i/Math.max(1,N)*6.283, R=110+Math.sqrt(
   return {...n,x:Math.cos(a)*R,y:Math.sin(a)*R,vx:0,vy:0};});
 const byId={};nodes.forEach(n=>byId[n.id]=n);
 const edges=DATA.edges.filter(e=>byId[e.s]&&byId[e.t]);
-let view={x:0,y:0,k:1},sel=null,filter="",drag=null,pan=null,frame=0,fitted=false;
+let view={x:0,y:0,k:1},sel=null,filter="",drag=null,pan=null,frame=0,userMoved=false;
 const dpr=()=>window.devicePixelRatio||1;
 // Coordinates are in CSS pixels; the context is dpr-scaled per frame (setTransform).
 let W=0,H=0;
-function resize(){const r=cv.getBoundingClientRect();W=Math.max(1,Math.round(r.width));H=Math.max(1,Math.round(r.height));cv.width=Math.round(W*dpr());cv.height=Math.round(H*dpr());fitted=false;}
+function resize(){const r=cv.getBoundingClientRect();W=Math.max(1,Math.round(r.width));H=Math.max(1,Math.round(r.height));cv.width=Math.round(W*dpr());cv.height=Math.round(H*dpr());if(frame>180&&!drag&&!pan)fitView();}
 try{new ResizeObserver(resize).observe(cv);}catch(e){}
 window.addEventListener('resize',resize);resize();
 document.getElementById('stat').textContent=N+" concepts · "+edges.length+" links";
@@ -179,7 +179,7 @@ function visible(n){if(off[n.domain])return false;if(filter&&!String(n.id).toLow
 function fin(v){return Number.isFinite(v)?v:0;}
 // force sim — clamped + center gravity so it can't fling nodes off-screen
 function step(){
-  const rep=1600,spring=0.045,grav=0.015,damp=0.85,maxV=28;
+  const rep=2200,spring=0.05,grav=0.02,damp=0.85,maxV=28,rest=85;
   for(const a of nodes){a.vx*=damp;a.vy*=damp;}
   for(let i=0;i<N;i++){const a=nodes[i];
     for(let j=i+1;j<N;j++){const b=nodes[j];
@@ -188,7 +188,7 @@ function step(){
       a.vx+=fx;a.vy+=fy;b.vx-=fx;b.vy-=fy;}}
   for(const e of edges){const a=byId[e.s],b=byId[e.t];
     let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||1;
-    const f=(d-70)*spring,fx=dx/d*f,fy=dy/d*f;
+    const f=(d-rest)*spring,fx=dx/d*f,fy=dy/d*f;
     a.vx+=fx;a.vy+=fy;b.vx-=fx;b.vy-=fy;}
   for(const n of nodes){n.vx-=n.x*grav;n.vy-=n.y*grav;
     if(n.vx>maxV)n.vx=maxV;else if(n.vx<-maxV)n.vx=-maxV;
@@ -197,13 +197,14 @@ function step(){
 }
 // auto-fit the settled layout into the viewport (so nodes are always visible)
 function fitView(){
-  let minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9,any=false;
-  for(const n of nodes){if(!visible(n))continue;any=true;
+  // centroid-centering (robust to a few far-flung outliers) + scale-to-fit
+  let minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9,cx=0,cy=0,c=0;
+  for(const n of nodes){if(!visible(n))continue;c++;cx+=n.x;cy+=n.y;
     if(n.x<minx)minx=n.x;if(n.x>maxx)maxx=n.x;if(n.y<miny)miny=n.y;if(n.y>maxy)maxy=n.y;}
-  if(!any)return;
+  if(!c)return;cx/=c;cy/=c;
   const gw=Math.max(1,maxx-minx),gh=Math.max(1,maxy-miny);
-  view.k=Math.max(0.2,Math.min(W/(gw+120),H/(gh+120),2));
-  view.x=W/2-((minx+maxx)/2)*view.k;view.y=H/2-((miny+maxy)/2)*view.k;
+  view.k=Math.max(0.2,Math.min(W/(gw+140),H/(gh+140),1.6));
+  view.x=W/2-cx*view.k;view.y=H/2-cy*view.k;
 }
 function toScr(n){return{x:n.x*view.k+view.x,y:n.y*view.k+view.y};}
 function draw(){
@@ -212,19 +213,28 @@ function draw(){
   ctx.lineWidth=1;ctx.strokeStyle="rgba(255,255,255,0.10)";
   for(const e of edges){const a=byId[e.s],b=byId[e.t];if(!visible(a)||!visible(b))continue;
     const pa=toScr(a),pb=toScr(b);ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);ctx.stroke();}
-  for(const n of nodes){if(!visible(n))continue;const p=toScr(n);const r=(4+n.deg*1.2)*Math.max(0.5,view.k);
+  for(const n of nodes){if(!visible(n))continue;const p=toScr(n);
+    // tiny fixed dots — never scale with zoom or degree enough to bury labels
+    const r=2+Math.min(n.deg,12)*0.18;
     ctx.beginPath();ctx.arc(p.x,p.y,r,0,6.283);ctx.fillStyle=domColor[n.domain]||"#888";ctx.fill();
-    if(n===sel){ctx.lineWidth=2;ctx.strokeStyle="#fff";ctx.stroke();}
-    if(view.k>0.55||n===sel){ctx.fillStyle="#ddd";ctx.font="11px Segoe UI";ctx.fillText(String(n.id),p.x+r+3,p.y+4);}}
+    if(n===sel){ctx.lineWidth=1.5;ctx.strokeStyle="#fff";ctx.stroke();}
+    if(view.k>0.4||n===sel){ctx.fillStyle="#cfcfcf";ctx.font="11px Segoe UI";ctx.fillText(String(n.id),p.x+r+3,p.y+3.5);}}
 }
-function loop(){try{step();frame++;if(frame===70&&!fitted){fitView();fitted=true;}draw();}catch(e){}requestAnimationFrame(loop);}
+function loop(){try{step();frame++;
+  if((frame===5||frame===70||frame===200)&&!drag&&!pan&&!userMoved)fitView();
+  // keep the node centroid eased to the canvas centre every frame (decoupled
+  // from the layout, so the graph can never sit off to one side)
+  // auto-centre the centroid until the user takes control of the view
+  if(!userMoved&&!drag&&!pan){let cx=0,cy=0;for(const n of nodes){cx+=n.x;cy+=n.y;}cx/=N;cy/=N;
+    view.x+=(W/2-(cx*view.k+view.x))*0.15;view.y+=(H/2-(cy*view.k+view.y))*0.15;}
+  draw();}catch(e){}requestAnimationFrame(loop);}
 loop();
 // interaction (CSS-pixel coordinates throughout)
-function pick(mx,my){let best=null,bd=1e9;for(const n of nodes){if(!visible(n))continue;const p=toScr(n);const d=(p.x-mx)**2+(p.y-my)**2;const r=((8+n.deg*1.2)*Math.max(0.5,view.k))**2;if(d<r&&d<bd){bd=d;best=n;}}return best;}
-cv.addEventListener('mousedown',e=>{const mx=e.offsetX,my=e.offsetY;const n=pick(mx,my);if(n){drag=n;sel=n;showDetail(n);}else{pan={x:e.clientX,y:e.clientY,vx:view.x,vy:view.y};}});
+function pick(mx,my){let best=null,bd=1e9;for(const n of nodes){if(!visible(n))continue;const p=toScr(n);const d=(p.x-mx)**2+(p.y-my)**2;const hit=Math.max(8,4+Math.min(n.deg,12)*0.18);if(d<hit*hit&&d<bd){bd=d;best=n;}}return best;}
+cv.addEventListener('mousedown',e=>{userMoved=true;const mx=e.offsetX,my=e.offsetY;const n=pick(mx,my);if(n){drag=n;sel=n;showDetail(n);}else{pan={x:e.clientX,y:e.clientY,vx:view.x,vy:view.y};}});
 window.addEventListener('mousemove',e=>{if(drag){drag.x=(e.offsetX-view.x)/view.k;drag.y=(e.offsetY-view.y)/view.k;drag.vx=drag.vy=0;}else if(pan){view.x=pan.vx+(e.clientX-pan.x);view.y=pan.vy+(e.clientY-pan.y);}});
 window.addEventListener('mouseup',()=>{drag=null;pan=null;});
-cv.addEventListener('wheel',e=>{e.preventDefault();const f=e.deltaY<0?1.1:0.9;const mx=e.offsetX,my=e.offsetY;const k2=Math.max(0.15,Math.min(4,view.k*f));view.x=mx-(mx-view.x)*(k2/view.k);view.y=my-(my-view.y)*(k2/view.k);view.k=k2;},{passive:false});
+cv.addEventListener('wheel',e=>{e.preventDefault();userMoved=true;const f=e.deltaY<0?1.1:0.9;const mx=e.offsetX,my=e.offsetY;const k2=Math.max(0.15,Math.min(4,view.k*f));view.x=mx-(mx-view.x)*(k2/view.k);view.y=my-(my-view.y)*(k2/view.k);view.k=k2;},{passive:false});
 function showDetail(n){const d=document.getElementById('detail');let s='';if(n.sources&&n.sources.length){s='<ul>'+n.sources.map(x=>'<li>'+String(x).replace(/[<>]/g,'')+'</li>').join('')+'</ul>';}
 d.style.display='block';d.innerHTML='<h2>'+String(n.id)+'</h2><div class="d">'+(n.desc||'(no description)')+'</div><div class="d" style="margin-top:8px">domain: <b style="color:'+(domColor[n.domain]||'#888')+'">'+n.domain+'</b> · '+n.deg+' links</div>'+(s?'<div class="d" style="margin-top:8px">sources:</div>'+s:'');}
 </script></body></html>"""

@@ -751,7 +751,10 @@ ipcMain.on("pi-web-desktop:open-okf-graph", async () => {
       return;
     }
     if (okfGraphWin && !okfGraphWin.isDestroyed()) {
-      okfGraphWin.loadFile(htmlPath);
+      // Cache-bust: loadFile would serve Chromium's cached copy of the same path
+    // after the file is regenerated, so the graph never updates. A unique query
+    // forces a fresh read from disk each open.
+    okfGraphWin.loadURL(require("url").pathToFileURL(htmlPath).href + "?t=" + Date.now());
       okfGraphWin.focus();
       return;
     }
@@ -766,7 +769,10 @@ ipcMain.on("pi-web-desktop:open-okf-graph", async () => {
     okfGraphWin.on("closed", () => {
       okfGraphWin = null;
     });
-    okfGraphWin.loadFile(htmlPath);
+    // Cache-bust: loadFile would serve Chromium's cached copy of the same path
+    // after the file is regenerated, so the graph never updates. A unique query
+    // forces a fresh read from disk each open.
+    okfGraphWin.loadURL(require("url").pathToFileURL(htmlPath).href + "?t=" + Date.now());
     if (process.env.PI_OKF_DEVTOOLS) okfGraphWin.webContents.openDevTools({ mode: "bottom" });
     dbg(`open-okf-graph: opened ${htmlPath}`);
   } catch (e) {
