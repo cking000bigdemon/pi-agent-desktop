@@ -215,7 +215,7 @@ async function ensureRuntime() {
 // ---------------------------------------------------------------------------
 // Bundled extensions sync (repo extensions-seed/ is the source of truth)
 // ---------------------------------------------------------------------------
-// Five single-file `.ts` extensions ship with the app. The repo's
+// Six single-file `.ts` extensions ship with the app. The repo's
 // `extensions-seed/` is their CANONICAL SOURCE — they are developed there, never
 // hand-edited in the data dir. On every launch we sync the bundle into
 // ~/.pi/agent/extensions/ so the deployed copies always match the installed
@@ -226,7 +226,7 @@ async function ensureRuntime() {
 // (+ transitive deps) is needed — pi injects @earendil-works/pi-coding-agent into
 // the extension loader itself, so it is intentionally NOT bundled.
 //
-// Only these 5 managed names are touched (any other file in the dir is left
+// Only these managed names are touched (any other file in the dir is left
 // alone), and any failure here is logged and swallowed so it can never block boot.
 const DEFAULT_EXTENSIONS = [
   "agents-md-injector.ts",
@@ -234,6 +234,7 @@ const DEFAULT_EXTENSIONS = [
   "general-agent-prompt.ts",
   "mcp-bridge.ts",
   "python-workdir-guard.ts",
+  "skill-shell-injection.ts",
   "variflight-web-search.ts",
 ];
 
@@ -293,7 +294,7 @@ async function ensureBundledExtensions() {
     }
   }
 
-  // The 5 managed extension files: (over)write whenever content differs from the
+  // The managed extension files: (over)write whenever content differs from the
   // bundle. The user no longer edits these in the data dir — the repo wins.
   let synced = 0;
   for (const file of DEFAULT_EXTENSIONS) {

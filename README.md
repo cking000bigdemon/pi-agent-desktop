@@ -28,7 +28,7 @@ pi-web-desktop/
 ├── vendor/node/        # 内置 Node.js 运行时(node.exe + npm) → resources/node            ← 构建输入(手动下载)
 ├── vendor/python/      # 内置 Python(python-build-standalone + ppt-master 依赖预装) → resources/python ← 构建输入(npm run seed:python)
 ├── runtime-seed/       # @cking000/pi-web 的 npm 生产安装(含 .next) → resources/runtime-seed        ← 构建输入(npm run seed)
-├── extensions-seed/    # 默认随装的 6 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
+├── extensions-seed/    # 默认随装的 7 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
 ├── skills-seed/        # 默认随装的技能(wiki 系列 OKF + ppt-master,源码已入库) → resources/skills-seed
 ├── scripts/            # seed-python.ps1 + vendor-python-requirements.txt(供给 vendor/python)
 ├── build/              # 应用图标(icon.svg / icon.png / icon.ico)
@@ -37,7 +37,7 @@ pi-web-desktop/
 ```
 
 > **构建输入 vs 入库源码**:`vendor/`、`runtime-seed/`、`extensions-seed/node_modules`、以及 pi-web fork 的本地工作副本 `pi-web/` 都体积大、已 gitignore,需按[下文](#从零准备构建输入)重新准备。
-> **已纳入版本库**:`extensions-seed/` 的 6 个 `.ts` 扩展源码、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
+> **已纳入版本库**:`extensions-seed/` 的 7 个 `.ts` 扩展源码、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
 
 ## 运行架构
 
@@ -45,7 +45,7 @@ pi-web-desktop/
    - 安装目录里的 `resources/runtime-seed` **可写** → **就地运行**（默认，秒开，无复制）；
    - 只读（如装到 `C:\Program Files`）→ 回退：用 **robocopy**（长路径安全）把种子复制到 `%APPDATA%/pi-web-desktop/runtime`，写 `.seeded` 标记（只复制一次）。
 2. **同步默认扩展与技能**（启动时，非阻塞、失败不挡启动）：
-   - `ensureBundledExtensions()` 把 6 个扩展同步进 `~/.pi/agent/extensions/`；
+   - `ensureBundledExtensions()` 把 7 个扩展同步进 `~/.pi/agent/extensions/`；
    - `ensureBundledSkills()` 把技能同步进 `~/.pi/agent/skills/`（见下「内置的扩展与技能」）。
 3. **注入 Python 环境**：spawn pi 服务时，把 `vendor/python` 前置到 `PATH` 并设 `PI_BUNDLED_PYTHON` / `PI_PY_GUARD_PYTHON` / `PI_PY_GUARD_BUNDLED_PYTHON`，供环境守卫与 `ppt-master` 使用。
 4. **启动服务**：用 `resources/node/node.exe` 跑 `next start`，绑定 `127.0.0.1` 随机空闲端口，隐藏窗口、无控制台。
@@ -60,7 +60,7 @@ pi-web-desktop/
 仓库的 `extensions-seed/` 与 `skills-seed/` 是这些能力的**唯一真源、在此开发**；每次启动按内容差异同步进 `~/.pi/agent/`，**仓库改 → 重装 / 重新运行即部署**。仓库外的其它扩展/技能一律不动。
 **⚠ 不要手改数据目录里这些受管文件——会被下次启动覆盖。**
 
-### 6 个默认扩展（`extensions-seed/` → `~/.pi/agent/extensions/`）
+### 7 个默认扩展（`extensions-seed/` → `~/.pi/agent/extensions/`）
 
 | 扩展 | 作用 |
 |---|---|
@@ -69,6 +69,7 @@ pi-web-desktop/
 | `general-agent-prompt` | 通用 agent 系统提示增强 |
 | `mcp-bridge` | 桥接 `mcp.json` 里的 MCP server（stdio/sse/http） |
 | `python-workdir-guard` | **Python 工作目录守卫**：自动建 `.venv`、强制 Python 走 `.venv`（见下「零依赖 Python」） |
+| `skill-shell-injection` | **Skill 动态上下文注入**：补上 Pi 原生没有的 Claude Code 式 `` !\`cmd\` `` / ```` ```! ```` 语法——SKILL.md/prompt 被加载时在 shell 执行内嵌命令、把输出内联替换进内容；钩 `read` 自动生效，另提供 `/skillx <name>` 直调 |
 | `variflight-web-search` | 内置 web 搜索工具 |
 
 受管文件**内容不同即覆盖**；`node_modules` 在缺失或 lockfile 变化时刷新。运行时 `@earendil-works/pi-coding-agent` 由 pi 注入扩展加载器，**不打包**；唯一需打包的依赖是 `@modelcontextprotocol/sdk`（mcp-bridge 用），由 `npm run seed:extensions` 准备。见 `main.js` 的 `ensureBundledExtensions()`。
