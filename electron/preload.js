@@ -14,6 +14,15 @@ contextBridge.exposeInMainWorld("piWebDesktop", {
   getDashboardStatus: () => ipcRenderer.invoke("pi-web-desktop:dashboard-status"),
 });
 
+// pi-web's OWN desktop bridge (upstream v0.7.13+): the session sidebar probes
+// `window.piDesktop` and, when present, uses the native directory picker for
+// its custom-path button instead of manual path input. Kept as a separate
+// bridge under the exact name upstream declares in SessionSidebar.tsx —
+// contract: selectDirectory(): Promise<string | null> (null = user cancelled).
+contextBridge.exposeInMainWorld("piDesktop", {
+  selectDirectory: () => ipcRenderer.invoke("pi-web-desktop:select-directory"),
+});
+
 // ---------------------------------------------------------------------------
 // In-page update-result CTA (top-right toast)
 // ---------------------------------------------------------------------------

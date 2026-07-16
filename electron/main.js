@@ -25,6 +25,7 @@ const net = require("net");
 const http = require("http");
 const updater = require("./updater");
 const dashboard = require("./features/dashboard");
+const directoryPicker = require("./features/directory-picker");
 
 const isWindows = process.platform === "win32";
 const REGISTRY = process.env.PI_WEB_REGISTRY || "https://registry.npmmirror.com";
@@ -804,6 +805,17 @@ ipcMain.handle("pi-web-desktop:dashboard-status", async () => {
       error: String((e && e.message) || e),
     };
   }
+});
+
+// ---------------------------------------------------------------------------
+// Native directory picker (window.piDesktop.selectDirectory)
+// ---------------------------------------------------------------------------
+// Backend for the desktop bridge pi-web's session sidebar probes for (see
+// features/directory-picker.js). Parented to the invoking window so the dialog
+// is modal over the app rather than floating free.
+ipcMain.handle("pi-web-desktop:select-directory", (event) => {
+  const parent = BrowserWindow.fromWebContents(event.sender) || win;
+  return directoryPicker.selectDirectory(parent);
 });
 
 // ---------------------------------------------------------------------------
