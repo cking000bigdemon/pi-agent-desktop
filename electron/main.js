@@ -131,7 +131,7 @@ function runtimeDir() {
   return _runtimeDirCache;
 }
 function piWebPkgDir() {
-  return path.join(runtimeDir(), "node_modules", "@cking000", "pi-web");
+  return path.join(runtimeDir(), "node_modules", "@agegr", "pi-web");
 }
 function nextBinPath() {
   return path.join(runtimeDir(), "node_modules", "next", "dist", "bin", "next");
@@ -196,7 +196,7 @@ async function ensureRuntime() {
     const v = updater.getInstalledVersion(rt);
     if (v) return v;
   }
-  if (!fs.existsSync(path.join(seed, "node_modules", "@cking000", "pi-web", ".next"))) {
+  if (!fs.existsSync(path.join(seed, "node_modules", "@agegr", "pi-web", ".next"))) {
     throw new Error(`runtime seed not found or incomplete at ${seed}`);
   }
   await fs.promises.mkdir(rt, { recursive: true });
@@ -232,7 +232,9 @@ async function ensureRuntime() {
 const DEFAULT_EXTENSIONS = [
   "agents-md-injector.ts",
   "auto-session-title.ts",
+  "claude-md-injector.ts",
   "general-agent-prompt.ts",
+  "language-guard.ts",
   "mcp-bridge.ts",
   "python-workdir-guard.ts",
   "skill-shell-injection.ts",

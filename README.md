@@ -1,6 +1,6 @@
 # pi-web-desktop（Pi Agent）
 
-把 [pi-web](https://github.com/cking000bigdemon/pi-web)（fork 自 [agegr/pi-web](https://github.com/agegr/pi-web)，pi 编程智能体的网页界面，发布为 npm 包 **`@cking000/pi-web`**）打包成一个**开箱即用的桌面应用**：
+把 [pi-web](https://github.com/agegr/pi-web)（pi 编程智能体的网页界面，npm 包 **`@agegr/pi-web`**）打包成一个**开箱即用的桌面应用**：
 双击即用，没有浏览器、没有地址栏、没有常驻终端窗口，**目标机器无需预装任何运行时**。
 
 它不只是「pi-web 套壳」——而是一台**电池全含的 AI 工作站**：内置 Node 与 Python 两套运行时、6 个默认扩展、一套 OKF 知识库技能（编译 / 查询 / 检查 / 可视化）和 PPT 生成技能 `ppt-master`，拷到空电脑双击即可使用。
@@ -8,8 +8,8 @@
 **核心特性**
 - 🧳 **内置 Node + Python 运行时** —— 目标机器无需 Node/npm/Python，拷到空电脑双击即用。
 - ⚡ **就地运行，首启秒开** —— 直接从（可写的）安装目录跑 pi-web，不做首启复制。
-- 🔄 **运行时自更新** —— App 内「检查更新」直接 `npm install @cking000/pi-web@latest`（npm 包自带预构建 `.next`，免编译），独立更新 pi-web + pi-coding-agent，**无需重新发版、不碰外壳代码**。
-- 🧩 **默认扩展随装** —— 6 个 pi 扩展每次启动从仓库同步进 `~/.pi/agent/extensions/`，仓库为唯一真源。
+- 🔄 **运行时自更新** —— App 内「检查更新」直接 `npm install @agegr/pi-web@latest`（npm 包自带预构建 `.next`，免编译），独立更新 pi-web + pi-coding-agent，**无需重新发版、不碰外壳代码**。
+- 🧩 **默认扩展随装** —— 9 个 pi 扩展每次启动从仓库同步进 `~/.pi/agent/extensions/`，仓库为唯一真源。
 - 📚 **默认技能随装** —— OKF 知识库技能 + `ppt-master` 演示文稿生成，每次启动同步进 `~/.pi/agent/skills/`，所有工作目录可用。
 - 🐍 **零依赖 Python 技能** —— 内置 Python 让 Python 技能「装完即用、离线零 pip」；环境守卫强制用户项目走干净的 `.venv`。
 - 🪟 **原生窗口** —— 内嵌 Next.js 服务隐藏运行在随机 `127.0.0.1` 端口，关窗即停。
@@ -20,15 +20,15 @@
 pi-web-desktop/
 ├── electron/
 │   ├── main.js         # 主进程:解析运行时、起内置 node 服务、开窗、检查更新、同步扩展/技能、注入 Python 环境、退出清理
-│   ├── updater.js      # 自更新逻辑(用内置 npm 查询/安装 @cking000/pi-web@latest)
+│   ├── updater.js      # 自更新逻辑(用内置 npm 查询/安装 @agegr/pi-web@latest)
 │   ├── preload.js      # 最小安全桥(contextIsolation 开启)—— 自定义能力的暴露入口
 │   ├── features/       # dashboard / subagents 等外壳后端逻辑
 │   ├── loading.html / updating.html / error.html
 │   └── ui/             # ★ 自定义能力的前端页面(可选,见「开发约束」)
 ├── vendor/node/        # 内置 Node.js 运行时(node.exe + npm) → resources/node            ← 构建输入(手动下载)
 ├── vendor/python/      # 内置 Python(python-build-standalone + ppt-master 依赖预装) → resources/python ← 构建输入(npm run seed:python)
-├── runtime-seed/       # @cking000/pi-web 的 npm 生产安装(含 .next) → resources/runtime-seed        ← 构建输入(npm run seed)
-├── extensions-seed/    # 默认随装的 7 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
+├── runtime-seed/       # @agegr/pi-web 的 npm 生产安装(含 .next) → resources/runtime-seed          ← 构建输入(npm run seed)
+├── extensions-seed/    # 默认随装的 9 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
 ├── skills-seed/        # 默认随装的技能(wiki 系列 OKF + ppt-master,源码已入库) → resources/skills-seed
 ├── scripts/            # seed-python.ps1 + vendor-python-requirements.txt(供给 vendor/python)
 ├── build/              # 应用图标(icon.svg / icon.png / icon.ico)
@@ -36,7 +36,7 @@ pi-web-desktop/
 └── package.json
 ```
 
-> **构建输入 vs 入库源码**:`vendor/`、`runtime-seed/`、`extensions-seed/node_modules`、以及 pi-web fork 的本地工作副本 `pi-web/` 都体积大、已 gitignore,需按[下文](#从零准备构建输入)重新准备。
+> **构建输入 vs 入库源码**:`vendor/`、`runtime-seed/`、`extensions-seed/node_modules` 都体积大、已 gitignore,需按[下文](#从零准备构建输入)重新准备。本地若存在 `pi-web/` 目录,那是已退役的 fork 工作副本(`cking000bigdemon/pi-web`,曾发布为 `@cking000/pi-web`),桌面端已回归上游包,不再是构建输入。
 > **已纳入版本库**:`extensions-seed/` 的 7 个 `.ts` 扩展源码、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
 
 ## 运行架构
@@ -45,12 +45,12 @@ pi-web-desktop/
    - 安装目录里的 `resources/runtime-seed` **可写** → **就地运行**（默认，秒开，无复制）；
    - 只读（如装到 `C:\Program Files`）→ 回退：用 **robocopy**（长路径安全）把种子复制到 `%APPDATA%/pi-web-desktop/runtime`，写 `.seeded` 标记（只复制一次）。
 2. **同步默认扩展与技能**（启动时，非阻塞、失败不挡启动）：
-   - `ensureBundledExtensions()` 把 7 个扩展同步进 `~/.pi/agent/extensions/`；
+   - `ensureBundledExtensions()` 把 9 个扩展同步进 `~/.pi/agent/extensions/`；
    - `ensureBundledSkills()` 把技能同步进 `~/.pi/agent/skills/`（见下「内置的扩展与技能」）。
 3. **注入 Python 环境**：spawn pi 服务时，把 `vendor/python` 前置到 `PATH` 并设 `PI_BUNDLED_PYTHON` / `PI_PY_GUARD_PYTHON` / `PI_PY_GUARD_BUNDLED_PYTHON`，供环境守卫与 `ppt-master` 使用。
 4. **启动服务**：用 `resources/node/node.exe` 跑 `next start`，绑定 `127.0.0.1` 随机空闲端口，隐藏窗口、无控制台。
 5. **加载窗口**：轮询服务就绪后 `loadURL` 到该端口。
-6. **检查更新**（菜单 `App → 检查更新…`，或启动后自动静默检查）：用内置 npm `view` 对比版本，有新版则 `npm install @cking000/pi-web@latest --omit=dev`，重启服务并刷新窗口。
+6. **检查更新**（菜单 `App → 检查更新…`，或启动后自动静默检查）：用内置 npm `view` 对比版本，有新版则 `npm install @agegr/pi-web@latest --omit=dev`，重启服务并刷新窗口。
 7. **退出**：`taskkill /T`（Windows）结束服务进程树，不留僵尸进程。
 
 数据目录沿用 pi 的 `~/.pi/agent`（会话、`models.json`、模型凭证），与终端 `pi`、全局 `pi-web` 共享。
@@ -60,14 +60,16 @@ pi-web-desktop/
 仓库的 `extensions-seed/` 与 `skills-seed/` 是这些能力的**唯一真源、在此开发**；每次启动按内容差异同步进 `~/.pi/agent/`，**仓库改 → 重装 / 重新运行即部署**。仓库外的其它扩展/技能一律不动。
 **⚠ 不要手改数据目录里这些受管文件——会被下次启动覆盖。**
 
-### 7 个默认扩展（`extensions-seed/` → `~/.pi/agent/extensions/`）
+### 9 个默认扩展（`extensions-seed/` → `~/.pi/agent/extensions/`）
 
 | 扩展 | 作用 |
 |---|---|
-| `agents-md-injector` | 把 AGENTS.md / CLAUDE.md 注入会话上下文 |
+| `agents-md-injector` | 把子目录 AGENTS.md 注入会话上下文 |
 | `auto-session-title` | 自动生成会话标题 |
+| `claude-md-injector` | `agents-md-injector` 姊妹版：把**子目录** CLAUDE.md 注入会话上下文（根目录 pi 原生已加载；目录同时有 AGENTS.md 时让位，不重复注入） |
 | `general-agent-prompt` | 通用 agent 系统提示增强 |
-| `mcp-bridge` | 桥接 `mcp.json` 里的 MCP server（stdio/sse/http） |
+| `language-guard` | **语言守卫**：检测 assistant 回复语言漂移（非中文主导即拦截），中断后注入中文要求并自动重发原任务；可选子 pi 复核，防死循环限重启次数 |
+| `mcp-bridge` | 桥接 `mcp.json` 里的 MCP server（stdio/sse/http）；MCP 工具默认**惰性加载**（`mcp_search_tools` 按需搜索激活，或 `/mcp-load` 手动），支持 eager/confirm/cwd 等单服配置 |
 | `python-workdir-guard` | **Python 工作目录守卫**：自动建 `.venv`、强制 Python 走 `.venv`（见下「零依赖 Python」） |
 | `skill-shell-injection` | **Skill 动态上下文注入**：补上 Pi 原生没有的 Claude Code 式 `` !\`cmd\` `` / ```` ```! ```` 语法——SKILL.md/prompt 被加载时在 shell 执行内嵌命令、把输出内联替换进内容；钩 `read` 自动生效，另提供 `/skillx <name>` 直调 |
 | `variflight-web-search` | 内置 web 搜索工具 |
@@ -127,12 +129,12 @@ pi 自动发现 `~/.pi/agent/skills/` 下的技能，因此它们在**每个工�
 # 1. 安装 Electron 壳依赖
 npm install
 
-# 2. 运行时种子(@cking000/pi-web 生产安装,含预构建 .next)
+# 2. 运行时种子(@agegr/pi-web 生产安装,含预构建 .next)
 mkdir runtime-seed; cd runtime-seed; npm init -y
-npm install @cking000/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com
+npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com
 cd ..
 
-# 2b. 默认扩展的共享依赖(6 个 .ts 扩展源码已入库;此步只装它们的 node_modules)
+# 2b. 默认扩展的共享依赖(9 个 .ts 扩展源码已入库;此步只装它们的 node_modules)
 npm run seed:extensions
 
 # 3. 内置 Node 运行时(win-x64)
@@ -179,37 +181,39 @@ npm run dist:dir    # 仅生成解包目录(调试更快)
 
 ## 开发约束（加新能力必读）
 
-> **本仓库只开发 Electron 外壳层。pi-web 和 pi-coding-agent 一律以 npm 包形式获取，本仓库不包含、不修改它们的源码。**
+> **本仓库只开发 Electron 外壳层。pi-web 和 pi-coding-agent 一律以上游 npm 包形式获取，本仓库不包含、不修改它们的源码。**
 
-这是一个**两仓库分工**的项目，职责严格分离：
+职责严格分离：
 
-| 仓库 | 职责 | 改动流向 |
+| 归属 | 职责 | 改动流向 |
 |---|---|---|
-| **[cking000bigdemon/pi-web](https://github.com/cking000bigdemon/pi-web)**（fork 自 agegr/pi-web） | pi-web 网页端本身的功能/页面/接口 | 在本地工作副本 `pi-web/` 改 → push 到该仓库 → `npm run build` 构建 → 发布为 `@cking000/pi-web` 上 npm |
+| **上游 [agegr/pi-web](https://github.com/agegr/pi-web)** | pi-web 网页端本身的功能/页面/接口 | 需要改 pi-web 时给上游提 PR → 上游合并发版 → 本项目 `runtime-seed` / 自更新从 npm 拉到 |
 | **本仓库 pi-web-desktop** | Electron 外壳：窗口、内置运行时、自更新、dashboard、IPC、默认扩展/技能、自定义能力 | 在 `electron/`、`extensions-seed/`、`skills-seed/` 改 → 重新打包安装程序 |
 
 **两条铁律：**
 
-1. **pi-web 的任何修改，只能在 fork 仓库里做**（本地 `pi-web/` → push 到 `https://github.com/cking000bigdemon/pi-web`），经构建发布为新版本的 `@cking000/pi-web`，再由本项目的 `runtime-seed` / 自更新从 npm 拉取。**绝不在本仓库或 `runtime-seed` 里直接改 pi-web 源码 / `.next`**——那会被下一次 `npm install @cking000/pi-web@latest` 冲掉。
-2. **pi-web 和 pi-coding-agent 只从 npm 获取**：
-   - pi-web = 你 fork 发布的 **`@cking000/pi-web`**；
+1. **pi-web 的任何修改不在本仓库做**——通用改动给上游 [agegr/pi-web](https://github.com/agegr/pi-web) 提 PR，合并发版后由 `runtime-seed` / 自更新吃到。**绝不在本仓库或 `runtime-seed` 里直接改 pi-web 源码 / `.next`**——那会被下一次 `npm install @agegr/pi-web@latest` 冲掉。
+2. **pi-web 和 pi-coding-agent 只从上游 npm 获取**：
+   - pi-web = 上游 **`@agegr/pi-web`**；
    - pi-coding-agent = 上游 **`@earendil-works/pi-coding-agent`**（作为 pi-web 的依赖随之安装，**不 fork、不改**）。
    - 本仓库不 vendoring、不内联它们的源码；`runtime-seed` 只是这两个 npm 包的一次生产安装。
+
+> **历史注**：2026-06~07 期间桌面端曾消费自有 fork `@cking000/pi-web`（Metro 磁贴皮肤 + 若干修复，仓库 [cking000bigdemon/pi-web](https://github.com/cking000bigdemon/pi-web)）。fork 的两个功能性修复（扩展工具丢失、slash 命令面板）先后被上游 0.6.18 / 0.7.0 吸收后，2026-07-21 桌面端回归上游包，fork 退役（仅 DMIT 健康助手部署仍在用）。
 
 ### 分层与红线
 
 ```
 你拥有、随便改 ─┐  electron/ · extensions-seed/ · skills-seed/ · scripts/        ← 本仓库
                 │
-pi-web 的功能  ─┤  在 fork 仓库 cking000bigdemon/pi-web 里改 → 发布 @cking000/pi-web
+pi-web 的功能  ─┤  给上游 agegr/pi-web 提 PR → 上游发版 @agegr/pi-web
                 │
 内置运行时     ─┤  resources/node · resources/python
                 │
-只读、不在此改 ─┘  resources/runtime-seed = @cking000/pi-web(npm 包) · ~/.pi 数据目录
+只读、不在此改 ─┘  resources/runtime-seed = @agegr/pi-web(npm 包) · ~/.pi 数据目录
 ```
 
 - ✅ **本仓库允许**：在 `electron/` 下加能力（Node 全权限）、加 IPC、加 preload API、加 UI；在 `extensions-seed/` 加默认扩展、`skills-seed/` 加默认技能。
-- ✅ **pi-web 的改动**：去 fork 仓库改并发版，这里通过升级 npm 包吃到。
+- ✅ **pi-web 的改动**：给上游提 PR，合并发版后这里通过升级 npm 包吃到。
 - ❌ **禁止**：在本仓库 / `runtime-seed` 里改 pi-web 源码或编译产物；fork、修改或内联 `@earendil-works/pi-coding-agent`。
 - 需要"后端能力"且不属于 pi-web 网页层时，放在 **Electron main 里用 IPC 暴露**（等价于你自己的后端）。
 
@@ -219,11 +223,10 @@ pi-web 的功能  ─┤  在 fork 仓库 cking000bigdemon/pi-web 里改 → 发
 2. **暴露通道** —— `ipcMain.handle("<域>:<动作>", …)` + `preload.js` 里 `contextBridge.exposeInMainWorld("piDesktop", { … })`。pi-web 本体不受影响。
 3. **展示界面** —— 三选一（按耦合度）：菜单 + 独立窗口（推荐，零耦合）/ preload 注入悬浮入口（体验一体，依赖注入点）/ 托盘 · 全局快捷键（轻量触发）。
 
-### 升级安全 & 给上游/fork 回流
+### 升级安全
 
 - 你的 `electron/`、`extensions-seed/`、`skills-seed/` 全在外壳层，自更新只换 `runtime-seed`，**碰不到**。
-- pi-web 的修复/功能在 fork 仓库维护；**通用、非定制的改动应尽量给 [agegr/pi-web](https://github.com/agegr/pi-web) 上游提 PR**，合并后即可丢弃 fork 中对应的本地补丁。
-- 定期 `git fetch upstream && rebase` 把 fork 同步到上游，解决冲突后重新发版。
+- pi-web 的修复/功能走上游 PR；上游发版后 `npm run seed`（打包）或应用内「检查更新」（已装机器）即可跟进。
 
 ---
 
@@ -234,4 +237,4 @@ pi-web 的功能  ─┤  在 fork 仓库 cking000bigdemon/pi-web 里改 → 发
 - **`ppt-master` 首次部署**约十几秒（上万文件），之后靠 `.seed-version` 签名秒级跳过。
 - **Python 仅 Windows x64**（与 `vendor/node` 一致）；mac/linux 暂未捆绑 Python。
 - **自更新粒度**是 pi-web 这一层；Electron 外壳（含扩展/技能/内置运行时）更新仍需重新发安装包。
-- **维护成本**：拥有 fork 意味着要自行同步上游 + 重新发版（换来"修复/定制不必等上游合并"的自由）。
+- **定制受限**：不再持有 fork，pi-web 层的改动需上游接受 PR 才能获得（换来零同步维护成本；历史 Metro 定制版存于 `cking000bigdemon/pi-web`，已退役）。
