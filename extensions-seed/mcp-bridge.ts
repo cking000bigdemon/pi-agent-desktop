@@ -24,6 +24,8 @@
  *   每个 server 可选字段:
  *     disabled: true   跳过该 server
  *     confirm:  true   调用该 server 的工具前弹确认(等价 PI_MCP_CONFIRM=all 的单服开关)
+ *     eager:    true   该 server 的工具默认激活(进上下文),不走惰性加载
+ *     eager: ["toolA"]  仅指定工具默认激活,其余惰性加载
  *     env: {...}       stdio 子进程额外环境变量(只加这些,不再继承 pi 的完整环境)
  *     cwd: "<path>"    stdio 子进程工作目录
  *     headers: {...}   http/sse 请求头
@@ -34,6 +36,13 @@
  *   PI_MCP_CONFIRM=all       所有 MCP 工具调用前都确认(默认仅 server 自带 confirm:true 才确认)
  *   PI_MCP_INSTRUCTIONS=0    不把各 server 的 instructions 注入 system prompt(默认注入)
  *   PI_MCP_TIMEOUT=<ms>      每个 server 的连接超时,默认 15000;超时记为失败,不阻塞启动
+ *   PI_MCP_LAZY=0            关闭惰性加载,所有 MCP 工具开机即激活(旧行为)
+ *
+ * 惰性加载(默认开):
+ *   所有 MCP 工具照旧注册,但默认不激活(不进上下文);仅保留加载器工具
+ *   mcp_search_tools 常驻。模型需要某能力时调 mcp_search_tools 搜索并自动激活命中工具,
+ *   pi 在下一次请求才把新工具定义补进去(支持 native deferred loading 的模型不破坏前缀缓存)。
+ *   可用 /mcp-load <server|工具名> 手动激活。
  */
 
 import * as fs from "node:fs";
@@ -145,16 +154,27 @@ async function listAllTools(client: Client): Promise<any[]> {
 // extension
 // ---------------------------------------------------------------------------
 
-type ToolEntry = { server: string; tool: string; client: Client; confirm: boolean };
+type ToolEntry = { server: string; tool: string; client: Client; confirm: boolean; eager: boolean };
 type ServerInfo = { name: string; type: string; ok: boolean; toolCount: number; error?: string };
+
+const LOADER_TOOL = "mcp_search_tools";
+
+// server.eager 字段解析:true=整服;数组=指定工具名(原始 MCP 名);其余=false
+function isEager(cfg: any, toolName: string): boolean {
+  const e = cfg?.eager;
+  if (e === true) return true;
+  if (Array.isArray(e)) return e.includes(toolName);
+  return false;
+}
 
 export default async function (pi: ExtensionAPI) {
   const clients: Client[] = [];
   const registry = new Map<string, ToolEntry>(); // pi 工具名 -> 调用信息
   const serverInfos: ServerInfo[] = [];
-  const instructionsBlocks: string[] = [];
+  const instructionsBlocks: { server: string; text: string }[] = [];
   const startupLog: string[] = [];
   const confirmAll = process.env.PI_MCP_CONFIRM?.toLowerCase() === "all";
+  const lazy = !off(process.env.PI_MCP_LAZY); // 默认开启惰性加载
 
   let servers: Record<string, any> = {};
   try {
@@ -194,7 +214,7 @@ export default async function (pi: ExtensionAPI) {
       // server 自报的 instructions(若有)→ 收集,稍后注入 system prompt
       const serverInstr = (client.getInstructions?.() as string | undefined) ?? undefined;
       if (serverInstr && serverInstr.trim()) {
-        instructionsBlocks.push(`## ${server}\n${serverInstr.trim()}`);
+        instructionsBlocks.push({ server, text: `## ${server}\n${serverInstr.trim()}` });
       }
 
       const needsConfirm = confirmAll || cfg?.confirm === true;
@@ -206,7 +226,7 @@ export default async function (pi: ExtensionAPI) {
           startupLog.push(`跳过重名工具 ${name}(来自 ${server})`);
           continue;
         }
-        registry.set(name, { server, tool: t.name, client, confirm: needsConfirm });
+        registry.set(name, { server, tool: t.name, client, confirm: needsConfirm, eager: isEager(cfg, t.name) });
         pi.registerTool({
           name,
           label: `${server}: ${t.name}`,
@@ -243,13 +263,106 @@ export default async function (pi: ExtensionAPI) {
   // 并行连接所有 server(allSettled:任一失败/超时不影响其它,也不阻塞 pi 启动)
   await Promise.allSettled(Object.entries(servers).map(([server, cfg]) => connectServer(server, cfg)));
 
+  // -------------------------------------------------------------------------
+  // 惰性加载:注册加载器工具 + 计算初始激活集
+  // -------------------------------------------------------------------------
+
+  const allMcpNames = () => [...registry.keys()];
+  const eagerNames = () => allMcpNames().filter((n) => registry.get(n)!.eager);
+  // 惰性隐藏的工具集合(需要靠 mcp_search_tools / mcp-load 激活)
+  const lazyNames = () => (lazy ? allMcpNames().filter((n) => !registry.get(n)!.eager) : []);
+
+  // 纯新增地激活一批工具名,返回真正新加的名字
+  function activate(names: string[]): string[] {
+    const active = pi.getActiveTools();
+    const added = names.filter((n) => registry.has(n) && !active.includes(n));
+    if (added.length > 0) pi.setActiveTools([...new Set([...active, ...added])]);
+    return added;
+  }
+
+  // 关键词匹配:在工具名 + 描述里打分
+  function searchTools(query: string, limit: number): string[] {
+    const terms = query.toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/).filter(Boolean);
+    if (terms.length === 0) return [];
+    return [...registry.entries()]
+      .map(([name, e]) => {
+        const hay = `${name} ${e.server} ${e.tool} ${pi.getAllTools().find((t) => t.name === name)?.description ?? ""}`.toLowerCase();
+        const score = terms.reduce((s, t) => s + (hay.includes(t) ? 1 : 0), 0);
+        return { name, score };
+      })
+      .filter((m) => m.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map((m) => m.name);
+  }
+
+  if (lazy && registry.size > 0) {
+    pi.registerTool({
+      name: LOADER_TOOL,
+      label: "MCP: search tools",
+      description:
+        "Search for and enable additional MCP tools that are not currently active. " +
+        "Use this whenever a task needs a capability (e.g. email, calendar, web search, database) " +
+        "that the currently active tools cannot perform. Pass a natural-language query describing " +
+        "the capability; matching tools are activated and become callable on the next step.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "要查找的能力或任务,如 'send email'、'日历日程'、'search web'" },
+          limit: { type: "integer", minimum: 1, maximum: 20, description: "最多激活多少个工具,默认 5" },
+        },
+        required: ["query"],
+      },
+      async execute(_toolCallId: string, params: any) {
+        const query = String(params?.query ?? "").trim();
+        const limit = Number(params?.limit) > 0 ? Math.min(Number(params.limit), 20) : 5;
+        if (!query) {
+          return { content: [{ type: "text", text: "query 不能为空" }], details: {}, isError: true };
+        }
+        const matches = searchTools(query, limit);
+        if (matches.length === 0) {
+          const hint = [...registry.keys()].slice(0, 30).join(", ");
+          return {
+            content: [{ type: "text", text: `未找到匹配 "${query}" 的 MCP 工具。\n已注册的工具(部分): ${hint}` }],
+            details: { matches: [] },
+          };
+        }
+        const added = activate(matches);
+        const text = added.length > 0
+          ? `已激活工具: ${added.join(", ")}\n现在可直接调用它们。`
+          : `匹配的工具已处于激活状态: ${matches.join(", ")}`;
+        return { content: [{ type: "text", text }], details: { matches, added } };
+      },
+    });
+  }
+
+  // 计算并应用初始激活集:剔除所有惰性 MCP 工具,保留内置/其它扩展工具 + eager 工具 + 加载器
+  function applyInitialActive() {
+    if (!lazy || registry.size === 0) return;
+    const hidden = new Set(lazyNames());
+    const base = pi.getActiveTools().filter((n) => !hidden.has(n));
+    const keep = [...base, ...eagerNames(), LOADER_TOOL];
+    pi.setActiveTools([...new Set(keep)]);
+  }
+
   // 启动后把连接结果反馈给用户(工厂里没有 ctx,放到 session_start)
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
+    applyInitialActive();
     const ok = serverInfos.filter((s) => s.ok);
     const total = ok.reduce((n, s) => n + s.toolCount, 0);
+    const eagerCount = eagerNames().length;
+    const lazyCount = lazyNames().length;
     if (ctx.hasUI) {
-      ctx.ui.setStatus("mcp", `MCP: ${ok.length} server / ${total} tools`);
-      if (ok.length > 0) ctx.ui.notify(`MCP 已桥接 ${ok.length} 个 server,共 ${total} 个工具`, "info");
+      const status = lazy
+        ? `MCP: ${ok.length} server / ${total} tools (${eagerCount} 激活, ${lazyCount} 惰性)`
+        : `MCP: ${ok.length} server / ${total} tools`;
+      ctx.ui.setStatus("mcp", status);
+      if (ok.length > 0) {
+        const msg = lazy
+          ? `MCP 已桥接 ${ok.length} 个 server,共 ${total} 个工具(${lazyCount} 个惰性加载,需时由 ${LOADER_TOOL} 激活)`
+          : `MCP 已桥接 ${ok.length} 个 server,共 ${total} 个工具`;
+        ctx.ui.notify(msg, "info");
+      }
       for (const line of startupLog) ctx.ui.notify(line, "warning");
     }
   });
@@ -257,11 +370,21 @@ export default async function (pi: ExtensionAPI) {
   // 注入各 server 的 instructions(默认开,PI_MCP_INSTRUCTIONS=0 关)
   pi.on("before_agent_start", async (event) => {
     if (off(process.env.PI_MCP_INSTRUCTIONS) || instructionsBlocks.length === 0) return undefined;
+    // 惰性模式下只注入「至少有一个工具已激活」的 server 的 instructions,避免未激活 server 白占上下文
+    let blocks = instructionsBlocks;
+    if (lazy) {
+      const active = new Set(pi.getActiveTools());
+      const activeServers = new Set(
+        [...registry.entries()].filter(([n]) => active.has(n)).map(([, e]) => e.server),
+      );
+      blocks = instructionsBlocks.filter((b) => activeServers.has(b.server));
+    }
+    if (blocks.length === 0) return undefined;
     return {
       systemPrompt:
         `${event.systemPrompt}\n\n# MCP Server Instructions\n` +
         `The following MCP servers provided usage instructions for their tools:\n\n` +
-        instructionsBlocks.join("\n\n"),
+        blocks.map((b) => b.text).join("\n\n"),
     };
   });
 
@@ -298,13 +421,48 @@ export default async function (pi: ExtensionAPI) {
         for (const s of serverInfos) {
           lines.push(`${s.ok ? "✓" : "✗"} ${s.name} [${s.type}] — ${s.ok ? `${s.toolCount} tools` : s.error}`);
           if (s.ok) {
+            const active = new Set(pi.getActiveTools());
             for (const [name, e] of registry) {
-              if (e.server === s.name) lines.push(`    - ${name}${e.confirm ? "  (需确认)" : ""}`);
+              if (e.server !== s.name) continue;
+              const state = active.has(name) ? "●激活" : "○惰性";
+              lines.push(`    ${state} ${name}${e.confirm ? "  (需确认)" : ""}`);
             }
           }
         }
       }
+      if (lazy) lines.push("", `提示: 惰性工具由模型调 ${LOADER_TOOL} 自动激活,或用 /mcp-load <server|工具名> 手动激活。`);
       ctx.ui.notify(lines.join("\n"), serverInfos.some((s) => !s.ok && s.error !== "disabled") ? "warning" : "info");
+    },
+  });
+
+  // 手动激活:/mcp-load <server|完整工具名|关键词> — 把匹配的惰性工具加入激活集
+  pi.registerCommand("mcp-load", {
+    description: "激活惰性加载的 MCP 工具: /mcp-load <server名|完整工具名|关键词>",
+    handler: async (args, ctx) => {
+      const arg = (Array.isArray(args) ? args.join(" ") : String(args ?? "")).trim();
+      if (!arg) {
+        ctx.ui.notify(`用法: /mcp-load <server名|完整工具名|关键词>\n例: /mcp-load wecom-mail  或  /mcp-load all`, "info");
+        return;
+      }
+      let targets: string[];
+      if (arg === "all") {
+        targets = allMcpNames();
+      } else if (registry.has(arg)) {
+        targets = [arg];
+      } else {
+        // 先按 server 名完全匹配,否则当关键词搜索
+        const byServer = allMcpNames().filter((n) => registry.get(n)!.server === arg);
+        targets = byServer.length > 0 ? byServer : searchTools(arg, 20);
+      }
+      if (targets.length === 0) {
+        ctx.ui.notify(`未找到匹配 "${arg}" 的 MCP 工具`, "warning");
+        return;
+      }
+      const added = activate(targets);
+      ctx.ui.notify(
+        added.length > 0 ? `已激活: ${added.join(", ")}` : `匹配的工具已处于激活状态: ${targets.join(", ")}`,
+        "info",
+      );
     },
   });
 }
