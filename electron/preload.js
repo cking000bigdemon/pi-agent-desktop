@@ -227,6 +227,66 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 });
 
 // ---------------------------------------------------------------------------
+// Readability fix for pi-web's own notice shelf (top-right transient notices)
+// ---------------------------------------------------------------------------
+// pi-web stacks its own transient notices (`/reload`, extension status output,
+// …) as cards pinned to the top-right of the chat column (NoticeShelf in its
+// ChatWindow). Upstream hard-codes each card to a single 60px line at
+// font-size 18 with `white-space:nowrap` + ellipsis, so any multi-line payload
+// — `/language-guard-status` is the usual offender — is cut off mid-sentence
+// with no way to read the rest.
+//
+// pi-web is not forked, so the shell repairs it from here. Those are React
+// INLINE styles, which a stylesheet can only beat with !important — the same
+// lever the bottom-bar reserve below pulls. !important also outranks animation
+// declarations in the cascade, so it overrides the 60px heights baked into
+// upstream's `notice-shelf-in/out` keyframes as well; only the height lock is
+// neutralised, opacity/transform still animate.
+(function fixNoticeShelf() {
+  // Only the real pi-web page — never the shell's own file:// pages.
+  if (location.protocol !== "http:") return;
+
+  const FONT = 14; // px — 18 is oversized for chrome-level text
+  const LINE = 1.5;
+  const PAD_Y = 12; // px — vertical padding on the text span
+  const DOT = 7; // px — upstream's status dot
+  // Nudge the dot onto the first line instead of the (now multi-line) centre.
+  const DOT_TOP = Math.round(PAD_Y + (FONT * LINE) / 2 - DOT / 2);
+
+  const CSS = [
+    // Card: grow to the content instead of locking to one 60px line. Very long
+    // notices scroll inside the card rather than swallowing the viewport.
+    ".notice-shelf-item{",
+    "height:auto !important;min-height:0 !important;max-height:40vh !important;",
+    "overflow-y:auto !important;align-items:flex-start !important;",
+    `font-size:${FONT}px !important;line-height:${LINE} !important;`,
+    "}",
+    `.notice-shelf-item>span:first-child{margin-top:${DOT_TOP}px !important;}`,
+    // Text: wrap instead of ellipsing, and break unbroken paths/URLs rather
+    // than pushing the card past its 620px cap.
+    ".notice-shelf-item>span:first-child+span{",
+    "white-space:pre-wrap !important;text-overflow:clip !important;",
+    "overflow:visible !important;overflow-wrap:anywhere !important;",
+    `padding:${PAD_Y}px 0 !important;`,
+    "}",
+  ].join("");
+
+  function inject() {
+    if (document.getElementById("pi-web-desktop-notice-shelf-style")) return;
+    const parent = document.head || document.documentElement;
+    if (!parent) {
+      document.addEventListener("DOMContentLoaded", inject, { once: true });
+      return;
+    }
+    const st = document.createElement("style");
+    st.id = "pi-web-desktop-notice-shelf-style";
+    st.textContent = CSS;
+    parent.appendChild(st);
+  }
+  inject();
+})();
+
+// ---------------------------------------------------------------------------
 // Bottom dashboard bar + bottom-right detail popover
 // ---------------------------------------------------------------------------
 // A slim status bar pinned to the bottom edge shows, for MCP and Extensions, a
