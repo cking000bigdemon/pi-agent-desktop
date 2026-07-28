@@ -1,7 +1,7 @@
 {
   "name": "pi-web-desktop",
   "productName": "Pi Agent",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Standalone desktop application wrapping pi-web (Electron). Bundles the pi-web Next.js server and a Chromium window into a single app.",
   "license": "MIT",
   "author": "",
@@ -12,7 +12,8 @@
     "seed:extensions": "cd extensions-seed && npm ci --omit=dev --registry=https://registry.npmmirror.com",
     "seed:python": "powershell -ExecutionPolicy Bypass -File scripts/seed-python.ps1",
     "dist": "electron-builder",
-    "dist:dir": "electron-builder --dir"
+    "dist:dir": "electron-builder --dir",
+    "test:guard": "node scripts/test-runtime-guard.js"
   },
   "devDependencies": {
     "electron": "^33.0.0",

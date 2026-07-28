@@ -8,7 +8,8 @@
 **核心特性**
 - 🧳 **内置 Node + Python 运行时** —— 目标机器无需 Node/npm/Python，拷到空电脑双击即用。
 - ⚡ **就地运行，首启秒开** —— 直接从（可写的）安装目录跑 pi-web，不做首启复制。
-- 🔄 **运行时自更新** —— App 内「检查更新」直接 `npm install @agegr/pi-web@latest`（npm 包自带预构建 `.next`，免编译），独立更新 pi-web + pi-coding-agent，**无需重新发版、不碰外壳代码**。
+- 🔄 **运行时自更新** —— App 内「检查更新」直接装 `@agegr/pi-web@latest`（npm 包自带预构建 `.next`，免编译），独立更新 pi-web + pi-coding-agent，**无需重新发版、不碰外壳代码**。安装走 **staging + 校验通过才原子换入**，更新失败/断网/中途被杀都不会损坏正在用的运行时。
+- 🩺 **启动自检与自愈** —— 每次启动先验证运行时的原生模块是否真的能加载；发现是安装被中断留下的残缺文件，自动按锁定版本重装修复（不趁机升级），而不是让用户对着 `server not ready in time` 干瞪眼。
 - 🧩 **默认扩展随装** —— 9 个 pi 扩展每次启动从仓库同步进 `~/.pi/agent/extensions/`，仓库为唯一真源。
 - 📚 **默认技能随装** —— OKF 知识库技能 + `ppt-master` 演示文稿生成，每次启动同步进 `~/.pi/agent/skills/`，所有工作目录可用。
 - 🐍 **零依赖 Python 技能** —— 内置 Python 让 Python 技能「装完即用、离线零 pip」；环境守卫强制用户项目走干净的 `.venv`。
@@ -20,10 +21,11 @@
 pi-web-desktop/
 ├── electron/
 │   ├── main.js         # 主进程:解析运行时、起内置 node 服务、开窗、检查更新、同步扩展/技能、注入 Python 环境、退出清理
-│   ├── updater.js      # 自更新逻辑(用内置 npm 查询/安装 @agegr/pi-web@latest)
+│   ├── updater.js      # npm 层:用内置 npm 查询版本 / 装到指定目录(installInto)
+│   ├── runtime-guard.js # 运行时完整性:启动校验、staging 安装、原子换入、崩溃恢复
 │   ├── preload.js      # 最小安全桥(contextIsolation 开启)—— 自定义能力的暴露入口
 │   ├── features/       # dashboard / subagents 等外壳后端逻辑
-│   ├── loading.html / updating.html / error.html
+│   ├── loading.html / updating.html / healing.html / error.html
 │   └── ui/             # ★ 自定义能力的前端页面(可选,见「开发约束」)
 ├── vendor/node/        # 内置 Node.js 运行时(node.exe + npm) → resources/node            ← 构建输入(手动下载)
 ├── vendor/python/      # 内置 Python(python-build-standalone + ppt-master 依赖预装) → resources/python ← 构建输入(npm run seed:python)
@@ -31,36 +33,69 @@ pi-web-desktop/
 ├── extensions-seed/    # 默认随装的 9 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
 ├── skills-seed/        # 默认随装的技能(wiki 系列 OKF + ppt-master,源码已入库) → resources/skills-seed
 ├── scripts/            # seed-python.ps1 + vendor-python-requirements.txt(供给 vendor/python)
+│                       # + test-runtime-guard.js(运行时守卫回归测试,npm run test:guard)
 ├── build/              # 应用图标(icon.svg / icon.png / icon.ico)
 ├── electron-builder.yml
 └── package.json
 ```
 
 > **构建输入 vs 入库源码**:`vendor/`、`runtime-seed/`、`extensions-seed/node_modules` 都体积大、已 gitignore,需按[下文](#从零准备构建输入)重新准备。本地若存在 `pi-web/` 目录,那是已退役的 fork 工作副本(`cking000bigdemon/pi-web`,曾发布为 `@cking000/pi-web`),桌面端已回归上游包,不再是构建输入。
-> **已纳入版本库**:`extensions-seed/` 的 7 个 `.ts` 扩展源码、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
+> **已纳入版本库**:`extensions-seed/` 的 9 个 `.ts` 扩展源码 + `manifest.json`(扩展目录清单)、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
 
 ## 运行架构
 
 1. **解析运行时目录**（`runtimeDir()`）：
    - 安装目录里的 `resources/runtime-seed` **可写** → **就地运行**（默认，秒开，无复制）；
    - 只读（如装到 `C:\Program Files`）→ 回退：用 **robocopy**（长路径安全）把种子复制到 `%APPDATA%/pi-web-desktop/runtime`，写 `.seeded` 标记（只复制一次）。
-2. **同步默认扩展与技能**（启动时，非阻塞、失败不挡启动）：
-   - `ensureBundledExtensions()` 把 9 个扩展同步进 `~/.pi/agent/extensions/`；
+2. **运行时完整性预检**（`runtime-guard.js`，在启动服务之前）：
+   - 先用 swap 日志把**上次中断的原子切换**收敛掉（完成向前 or 回滚，绝不会留下"运行时目录不存在"）；
+   - 再校验运行时是否真的能用：结构文件（`next` CLI / `.next/BUILD_ID` / react）、**本平台**原生模块能否 `require`（在内置 node 的**子进程**里探测——主进程 require 既会因 ABI 不同而失配，也会锁住 DLL 导致后续切换失败）、以及 `node_modules` 里有没有 npm 的 `.<包名>-<随机>` 临时目录（安装被中断的指纹）；
+   - 判定为**可修复**（文件截断/缺失）→ 自动走下面第 6 步同一条原子安装路径重装**当前锁定版本**（不趁机升级）；判定为环境问题（ABI 不符、缺系统 DLL）→ 直接报错，不做无意义的重装循环。
+3. **同步默认扩展与技能**（启动时，非阻塞、失败不挡启动）：
+   - 扩展：**首次启动弹选择器**让用户勾选装哪些，之后每次启动做**非破坏性同步**（不覆盖用户改过的文件），见下「内置的扩展与技能」；
    - `ensureBundledSkills()` 把技能同步进 `~/.pi/agent/skills/`（见下「内置的扩展与技能」）。
-3. **注入 Python 环境**：spawn pi 服务时，把 `vendor/python` 前置到 `PATH` 并设 `PI_BUNDLED_PYTHON` / `PI_PY_GUARD_PYTHON` / `PI_PY_GUARD_BUNDLED_PYTHON`，供环境守卫与 `ppt-master` 使用。
-4. **启动服务**：用 `resources/node/node.exe` 跑 `next start`，绑定 `127.0.0.1` 随机空闲端口，隐藏窗口、无控制台。
-5. **加载窗口**：轮询服务就绪后 `loadURL` 到该端口。
-6. **检查更新**（菜单 `App → 检查更新…`，或启动后自动静默检查）：用内置 npm `view` 对比版本，有新版则 `npm install @agegr/pi-web@latest --omit=dev`，重启服务并刷新窗口。
-7. **退出**：`taskkill /T`（Windows）结束服务进程树，不留僵尸进程。
+4. **注入 Python 环境**：spawn pi 服务时，把 `vendor/python` 前置到 `PATH` 并设 `PI_BUNDLED_PYTHON` / `PI_PY_GUARD_PYTHON` / `PI_PY_GUARD_BUNDLED_PYTHON`，供环境守卫与 `ppt-master` 使用。
+5. **启动服务**：用 `resources/node/node.exe` 跑 `next start`，绑定 `127.0.0.1` 随机空闲端口，隐藏窗口、无控制台。
+6. **加载窗口**：轮询服务就绪后 `loadURL` 到该端口。
+7. **检查更新**（菜单 `App → 检查更新…`，或启动后自动静默检查）：用内置 npm `view` 对比版本，有新版则**原子安装**：
+   - 装进兄弟目录 `.runtime-seed.staging`（同卷，保证 rename 是原子移动），**期间旧服务照常运行**；
+   - 用与第 2 步**完全相同**的校验做验收，不通过就丢弃 staging，线上运行时**一字节不动**；
+   - 通过后才停服务 → `rename` 换入（失败自动回滚）→ 重启服务并刷新窗口。
+   - 自愈与更新共用**同一把锁**，不会并发；刚自愈过 2 分钟内会跳过这次自动检查，避免让用户连等两次安装。
+8. **退出**：`taskkill /T`（Windows）结束服务进程树，不留僵尸进程。
+
+> 第 2、7 步的机制由 `electron/runtime-guard.js` 实现，回归测试 `npm run test:guard`。
+> 背景：早先"就地 `npm install`"被中断过两次，把正在使用的 `@next/swc-*.node` 写成了截断文件（PE 头合法、尾部缺失），Windows 拒绝加载 → `next.config.ts` 加载失败 → 服务起不来，用户只看到无从下手的 `server not ready in time`。
 
 数据目录沿用 pi 的 `~/.pi/agent`（会话、`models.json`、模型凭证），与终端 `pi`、全局 `pi-web` 共享。
 
 ## 内置的扩展与技能
 
-仓库的 `extensions-seed/` 与 `skills-seed/` 是这些能力的**唯一真源、在此开发**；每次启动按内容差异同步进 `~/.pi/agent/`，**仓库改 → 重装 / 重新运行即部署**。仓库外的其它扩展/技能一律不动。
-**⚠ 不要手改数据目录里这些受管文件——会被下次启动覆盖。**
+仓库的 `extensions-seed/` 与 `skills-seed/` 是这些能力的**发布源**；每次启动同步进 `~/.pi/agent/`，仓库外的其它扩展/技能一律不动。
 
-### 9 个默认扩展（`extensions-seed/` → `~/.pi/agent/extensions/`）
+两者的覆盖策略**不同**：
+
+- **技能**：仍是「仓库赢」——受管技能目录内容不同即覆盖（**别在 `~/.pi/agent/skills/` 手改受管技能**）。
+- **扩展**：**用户赢**。首次启动让用户勾选装哪些；此后只在文件**仍与我们写下去时一模一样**（未被用户改过）时才随应用升级刷新。你在 `~/.pi/agent/extensions/` 里改过的扩展**永远不会被自动覆盖**，只会在「扩展管理」里标成「有新版可用」，由你决定是否点「恢复内置版本」（会先把你的版本备份成 `<名>.ts.userbak.<时间戳>`）。
+
+### 扩展的选择性安装（`extensions-seed/` → `~/.pi/agent/extensions/`）
+
+`extensions-seed/manifest.json` 是受管扩展集合的**唯一真源**（id / 文件名 / 中文名 / 说明 / 是否默认勾选 / npm 依赖），驱动选择器 UI 与启动同步；`main.js` 里不再硬编码文件清单。
+
+| 场景 | 行为 |
+|---|---|
+| 首次启动（没有选择记录） | 弹出选择器并**阻塞**到用户确认，服务按选中的集合启动；关掉窗口＝这次啥也不装，下次启动再问 |
+| 菜单 `App → 扩展管理…` | 同一个窗口，可随时改勾选；应用后询问是否重启内嵌服务（或自行在 pi 里 `/reload`） |
+| 取消勾选 | **不删除**，重命名成 `<名>.ts.disabled`（pi 自己的停用约定，dashboard 也认这个）；重新勾回来时恢复的是**你那份**，不是内置版 |
+| 已装且未被改动 + 应用带来新版 | 静默升级 |
+| 已装且**被你改过** | 原样保留，仅标记「有新版可用」 |
+| 手动删掉某个已勾选的扩展 | 下次启动补装（想彻底不要就在选择器里取消勾选） |
+| 新版本新增的默认扩展 | 自动装上（纯新增文件，不会覆盖任何东西） |
+| 依赖 `node_modules` | 只在**有选中的扩展声明依赖**时才部署（目前只有 `mcp-bridge` 需要 `@modelcontextprotocol/sdk`，约 20MB），缺失或 lockfile 变化时刷新 |
+
+判定「改没改过」用的是**忽略换行符**的内容哈希（`core.autocrlf` 会把种子检出成 CRLF，纯换行差异不能算用户改动）。选择与部署记录写在 `userData/extensions-state.json`，`~/.pi` 里不留任何附加文件。实现见 `electron/features/extensions-manager.js`（策略注释在文件头）、`electron/extensions-picker.html`、`electron/extensions-preload.js`。
+
+### 内置的 9 个扩展
 
 | 扩展 | 作用 |
 |---|---|
@@ -72,9 +107,9 @@ pi-web-desktop/
 | `mcp-bridge` | 桥接 `mcp.json` 里的 MCP server（stdio/sse/http）；MCP 工具默认**惰性加载**（`mcp_search_tools` 按需搜索激活，或 `/mcp-load` 手动），支持 eager/confirm/cwd 等单服配置 |
 | `python-workdir-guard` | **Python 工作目录守卫**：自动建 `.venv`、强制 Python 走 `.venv`（见下「零依赖 Python」） |
 | `skill-shell-injection` | **Skill 动态上下文注入**：补上 Pi 原生没有的 Claude Code 式 `` !\`cmd\` `` / ```` ```! ```` 语法——SKILL.md/prompt 被加载时在 shell 执行内嵌命令、把输出内联替换进内容；钩 `read` 自动生效，另提供 `/skillx <name>` 直调 |
-| `variflight-web-search` | 内置 web 搜索工具 |
+| `variflight-web-search` | **联网搜索**（三个互补工具，按成本分级）：`variflight_web_search`（免费，VariFlight AI 网关 Responses API + 内置 web_search，返回带来源的结论）、`perplexity_search`（$0.005/次，结构化 ranked results）、`perplexity_pro_search`（$0.008/次 + token 费，Sonar Pro 多步深度检索） |
 
-受管文件**内容不同即覆盖**；`node_modules` 在缺失或 lockfile 变化时刷新。运行时 `@earendil-works/pi-coding-agent` 由 pi 注入扩展加载器，**不打包**；唯一需打包的依赖是 `@modelcontextprotocol/sdk`（mcp-bridge 用），由 `npm run seed:extensions` 准备。见 `main.js` 的 `ensureBundledExtensions()`。
+运行时 `@earendil-works/pi-coding-agent` 由 pi 注入扩展加载器，**不打包**；唯一需打包的依赖是 `@modelcontextprotocol/sdk`（mcp-bridge 用），由 `npm run seed:extensions` 准备。
 
 ### 默认技能（`skills-seed/` → `~/.pi/agent/skills/`）
 
@@ -162,7 +197,8 @@ npm start
 - `PI_WEB_AUTO_UPDATE_CHECK=0` —— 关闭启动后的自动检查更新。
 - `PI_CODING_AGENT_DIR` —— 指定 pi 会话数据目录（默认 `~/.pi/agent`）。
 
-**开发默认扩展**：改 `extensions-seed/*.ts`，`npm start` 启动时同步进 `~/.pi/agent/extensions/`（内容不同即覆盖），重启即可验证；新增/变更依赖则改 `extensions-seed/package.json` 后跑 `npm run seed:extensions`。
+**开发默认扩展**：改 `extensions-seed/*.ts` 后 `npm start`。注意扩展同步现在是**非破坏性**的——只有 `~/.pi/agent/extensions/` 里那份仍与上次部署时一模一样（你没手改过）才会被刷新；否则你的版本被保留，只在「扩展管理」里标「有新版可用」。**开发时更省事的做法**：直接在 `~/.pi/agent/extensions/` 里改（不会再被启动覆盖了），改完再拷回 `extensions-seed/` 入库；或者在扩展管理里点「恢复内置版本」强制拉取仓库版（会先备份你的改动）。
+新增一个扩展：把 `.ts` 放进 `extensions-seed/` **并在 `extensions-seed/manifest.json` 里登记**（未登记的文件不会被部署，也不出现在选择器里）；`default: true` 的新扩展会在用户升级后自动装上。新增/变更 npm 依赖则改 `extensions-seed/package.json` + 在 manifest 对应条目的 `deps` 里声明，然后跑 `npm run seed:extensions`。
 **开发默认技能**：改 `skills-seed/<skill>/`，`npm start` 启动时按 `.seed-version` 签名同步进 `~/.pi/agent/skills/`（文件 mtime 变即重新部署）；Python 技能用 `$PI_BUNDLED_PYTHON` 调用脚本，新增重依赖请加进 `scripts/vendor-python-requirements.txt` 并 `npm run seed:python` 重供给。
 
 ## 打包安装程序

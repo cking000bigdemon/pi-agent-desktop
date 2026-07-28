@@ -10,6 +10,12 @@ dist/
 vendor/
 runtime-seed/
 
+# runtime-guard sidecars. Staging tree, rollback trash and swap journal are
+# created NEXT TO the runtime dir so renames stay on one volume — in dev mode
+# that means the repo root. They are transient by design; recoverInterruptedSwap
+# sweeps them on the next launch.
+.runtime-seed.*
+
 # Legacy v1 source clone (no longer used at runtime)
 pi-web/
 

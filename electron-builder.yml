@@ -37,8 +37,10 @@ extraResources:
       - "**/*"
       - "!**/*.map"
       - "!**/.cache/**"
-  # Default pi extensions (5 single-file .ts + shared deps) -> resources/extensions-seed.
-  # Copied into ~/.pi/agent/extensions/ on first run (see ensureBundledExtensions in main.js).
+  # Bundled pi extensions (single-file .ts + manifest.json + shared deps) ->
+  # resources/extensions-seed. manifest.json catalogues the set; the first-run
+  # picker lets the user choose which ones get deployed into
+  # ~/.pi/agent/extensions/ (see electron/features/extensions-manager.js).
   - from: extensions-seed
     to: extensions-seed
     filter:

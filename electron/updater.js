@@ -9,6 +9,14 @@
  *
  * All npm calls go through the BUNDLED node + npm so the target machine needs
  * nothing pre-installed.
+ *
+ * NOTE ON WHERE INSTALLS LAND: `installInto()` is the entry point used by
+ * runtime-guard.js, which always points it at a STAGING directory and only
+ * swaps the result into place once it verifies. `installLatest()` — the old
+ * in-place install — is kept only for callers that explicitly want the legacy
+ * behaviour; new code should not use it, because an interruption mid-install
+ * corrupts the live runtime (exactly the failure this module's staging path
+ * was added to prevent).
  */
 
 const { execFile } = require("child_process");
@@ -91,6 +99,45 @@ async function installLatest(ctx, onProgress) {
   );
 }
 
+/**
+ * Install into an arbitrary directory (in practice: runtime-guard's staging dir).
+ *
+ * `spec` selects the two modes that matter:
+ *   - a package spec (e.g. "@agegr/pi-web@latest") → an UPDATE. npm resolves the
+ *     new version and rewrites package.json/package-lock.json in the staging dir,
+ *     so the manifests travel with the tree they describe when it is swapped in.
+ *   - null → a REINSTALL of what the copied lockfile already pins. Used by the
+ *     self-heal path: reproduce the current version exactly rather than silently
+ *     turning "your install is damaged" into "you also got upgraded".
+ *
+ * `npm ci` is preferred for the null case because it installs strictly from the
+ * lockfile into an empty tree — the most reproducible option available. It
+ * refuses to run when the lockfile is absent or out of sync with package.json,
+ * so fall back to `npm install` there.
+ */
+async function installInto(ctx, dir, spec, onProgress) {
+  const common = ["--omit=dev", "--no-audit", "--no-fund"];
+  const opts = { cwd: dir, timeout: 900000, onProgress };
+
+  if (spec) {
+    return runNpm(ctx, ["install", spec, ...common], opts);
+  }
+
+  const fs = require("fs");
+  const hasLock = fs.existsSync(path.join(dir, "package-lock.json"));
+  if (hasLock) {
+    try {
+      return await runNpm(ctx, ["ci", ...common], opts);
+    } catch (e) {
+      // Out-of-sync lockfile (EUSAGE) — fall through to a normal install rather
+      // than leaving the user with an unrepairable runtime.
+      const msg = String((e && e.stderr) || (e && e.message) || "");
+      if (!/EUSAGE|can only install packages when|lock ?file/i.test(msg)) throw e;
+    }
+  }
+  return runNpm(ctx, ["install", ...common], opts);
+}
+
 /** Compare dotted versions (x.y.z[-tag]); returns true if `latest` > `installed`. */
 function isNewer(latest, installed) {
   if (!installed) return true;
@@ -114,5 +161,6 @@ module.exports = {
   getInstalledAgentVersion,
   getLatestVersion,
   installLatest,
+  installInto,
   isNewer,
 };

@@ -2,8 +2,8 @@
  * Python Workdir Guard for pi
  *
  * Global extension for Python-oriented workspaces:
- * 1. On first use of a working directory, create a basic AGENTS.md and a
- *    project-local Python virtual environment (.venv).
+ * 1. On first use of a working directory, create a project-local Python
+ *    virtual environment (.venv).
  *    This is attempted on session_start and also lazily before the first
  *    agent turn, so SDK integrations that load extension hooks but do not
  *    emit session_start still initialize correctly.
@@ -11,12 +11,16 @@
  *    installation, including Python-based skills under .agents/skills or
  *    .pi/skills. Global pip/global Python execution is blocked.
  *
+ * The workspace Python policy that used to be injected into the agent system
+ * prompt now lives in general-agent-prompt.ts (PI_GP_PYTHON section). This
+ * extension keeps only venv creation + shell enforcement + the status command,
+ * and no longer creates AGENTS.md.
+ *
  * Install:
  *   Save as ~/.pi/agent/extensions/python-workdir-guard.ts and run /reload.
  *
  * Environment variables:
  *   PI_PY_GUARD_VENV_DIR=.venv          Virtualenv directory name/path.
- *   PI_PY_GUARD_CREATE_AGENTS=0         Disable automatic AGENTS.md creation.
  *   PI_PY_GUARD_CREATE_VENV=0           Disable automatic virtualenv creation.
  *   PI_PY_GUARD_BLOCK_GLOBAL_PYTHON=0   Allow global python script execution.
  *   PI_PY_GUARD_BLOCK_GLOBAL_TOOLS=0    Allow global pytest/ruff/etc entrypoints.
@@ -32,7 +36,6 @@ import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_VENV_DIR = ".venv";
-const AGENTS_FILE = "AGENTS.md";
 const CUSTOM_MESSAGE_TYPE = "python-workdir-guard";
 
 const PYTHON_RELATED_FILENAMES = new Set([
@@ -95,42 +98,6 @@ async function isVenvPresent(cwd: string): Promise<boolean> {
   return (await exists(posixPython)) || (await exists(windowsPython));
 }
 
-function buildAgentsContent(cwd: string): string {
-  const projectName = path.basename(cwd) || "project";
-  const venv = venvDirName();
-  return `# AGENTS.md
-
-Project instructions for pi coding agents working in **${projectName}**.
-
-## Baseline
-- Keep changes focused and minimal.
-- Prefer reading existing files before editing.
-- Do not commit secrets, API keys, tokens, virtual environments, caches, or generated logs.
-
-## Python environment policy
-- Use the project-local Python virtual environment at \`${venv}\` for all Python work in this working directory.
-- If \`${venv}\` is missing, create it before Python work: \`python -m venv ${venv}\`.
-- Run Python through the virtualenv interpreter:
-  - POSIX/Git Bash: \`${venv}/bin/python\`
-  - Windows PowerShell/CMD: \`${venv}\\Scripts\\python.exe\`
-- Install dependencies only into this virtualenv, for example:
-  - POSIX/Git Bash: \`${venv}/bin/python -m pip install <package>\`
-  - Windows PowerShell/CMD: \`${venv}\\Scripts\\python.exe -m pip install <package>\`
-- Do **not** use global installs: no \`pip install\`, \`pip install --user\`, \`sudo pip install\`, global \`python -m pip install\`, or \`uv pip install --system\`.
-- For Python scripts inside skills, including \`.agents/skills/**\` and \`.pi/skills/**\`, use this same project virtualenv unless the user explicitly asks for an isolated per-skill virtualenv.
-`;
-}
-
-async function createAgentsIfMissing(cwd: string): Promise<boolean> {
-  if (isFalsey(process.env.PI_PY_GUARD_CREATE_AGENTS)) return false;
-
-  const agentsPath = path.join(cwd, AGENTS_FILE);
-  if (await exists(agentsPath)) return false;
-
-  await fsp.writeFile(agentsPath, buildAgentsContent(cwd), "utf8");
-  return true;
-}
-
 async function createVenvIfMissing(cwd: string): Promise<{ created: boolean; error?: string }> {
   if (isFalsey(process.env.PI_PY_GUARD_CREATE_VENV)) return { created: false };
   if (await isVenvPresent(cwd)) return { created: false };
@@ -177,10 +144,9 @@ async function createVenvIfMissing(cwd: string): Promise<{ created: boolean; err
   };
 }
 
-async function ensureWorkspace(cwd: string): Promise<{ agentsCreated: boolean; venvCreated: boolean; venvError?: string }> {
-  const agentsCreated = await createAgentsIfMissing(cwd);
+async function ensureWorkspace(cwd: string): Promise<{ venvCreated: boolean; venvError?: string }> {
   const venv = await createVenvIfMissing(cwd);
-  return { agentsCreated, venvCreated: venv.created, venvError: venv.error };
+  return { venvCreated: venv.created, venvError: venv.error };
 }
 
 function resolveToolPath(rawPath: unknown, cwd: string): string | undefined {
@@ -402,7 +368,6 @@ export default function (pi: ExtensionAPI) {
     let promise = ensurePromises.get(ctx.cwd);
     if (!promise) {
       promise = ensureWorkspace(ctx.cwd).catch((error) => ({
-        agentsCreated: false,
         venvCreated: false,
         venvError: error instanceof Error ? error.message : String(error),
       }));
@@ -421,7 +386,6 @@ export default function (pi: ExtensionAPI) {
 
     const messages: string[] = [];
 
-    if (result.agentsCreated) messages.push(`created ${AGENTS_FILE}`);
     if (result.venvCreated) messages.push(`created ${venvDirName()}`);
 
     const notifyKey = `${ctx.cwd}\0${messages.join(",")}\0${result.venvError ?? ""}`;
@@ -450,16 +414,13 @@ export default function (pi: ExtensionAPI) {
     await ensureWorkspaceForContext(ctx);
   });
 
-  pi.on("before_agent_start", async (event, ctx) => {
+  pi.on("before_agent_start", async (_event, ctx) => {
     // Some SDK integrations create/bind enough extension runtime for prompt hooks
-    // but skip or miss the session_start lifecycle event. Keep initialization
-    // idempotent here so a fresh SDK-backed session still gets AGENTS.md + .venv
-    // before the agent starts acting on the user's first prompt.
+    // but skip or miss the session_start lifecycle event. Keep venv creation
+    // idempotent here so a fresh SDK-backed session still gets .venv before the
+    // agent starts acting on the user's first prompt. The workspace Python policy
+    // prompt is injected by general-agent-prompt.ts (PI_GP_PYTHON section), not here.
     await ensureWorkspaceForContext(ctx);
-
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n${workspacePolicyPrompt(ctx.cwd)}`,
-    };
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -493,14 +454,12 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       await ensureWorkspaceForContext(ctx);
       const venvPresent = await isVenvPresent(ctx.cwd);
-      const agentsPresent = await exists(path.join(ctx.cwd, AGENTS_FILE));
       const message = [
-        `AGENTS.md: ${agentsPresent ? "present" : "missing"}`,
         `${venvDirName()}: ${venvPresent ? "present" : "missing"}`,
         "",
         workspacePolicyPrompt(ctx.cwd),
       ].join("\n");
-      ctx.ui.notify(message, venvPresent && agentsPresent ? "info" : "warning");
+      ctx.ui.notify(message, venvPresent ? "info" : "warning");
     },
   });
 }

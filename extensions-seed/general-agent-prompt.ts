@@ -20,12 +20,14 @@
  *   PI_GP_FAITHFUL=0  不追加忠实工作段
  *   PI_GP_COMMS=0     不追加沟通风格段（含"默认中文回复"）
  *   PI_GP_TOOLS=0     不追加工具卫生段
+ *   PI_GP_PYTHON=0    不追加 Python 工作区 venv 政策段
  *   PI_GP_RUNTIME=0   不追加桌面运行时段（仅在检测到 Pi Agent 桌面壳时才会注入）
  */
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as os from "node:os";
+import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const execFileAsync = promisify(execFile);
@@ -123,6 +125,39 @@ const COMMS = `# Communication
 - When referencing a specific file or line of code, use the file_path:line_number format so it is clickable.
 - Do not put a colon immediately before a tool call — your tool calls may not be shown, so "Let me read the file." reads better than "Let me read the file:".`;
 
+// === Python 工作区 venv 政策段 =========================================
+// 原先由 python-workdir-guard.ts 在 before_agent_start 注入，现随通用提示词一起
+// 加载。与该守卫扩展的 venv 目录约定保持一致（PI_PY_GUARD_VENV_DIR，默认 .venv）：
+// 守卫扩展负责实际创建 .venv 并在 shell 层拦截全局 python/pip，本段只把政策告知模型。
+
+function venvDirName(): string {
+  return process.env.PI_PY_GUARD_VENV_DIR || ".venv";
+}
+
+function venvPythonDisplay(cwd: string): { posix: string; windows: string } {
+  const dir = venvDirName();
+  const relative = path.isAbsolute(dir) ? path.relative(cwd, dir) || dir : dir;
+  return {
+    posix: `${relative.replace(/\\/g, "/")}/bin/python`,
+    windows: `${relative}\\Scripts\\python.exe`,
+  };
+}
+
+function pythonSection(cwd: string): string {
+  const venv = venvDirName();
+  const d = venvPythonDisplay(cwd);
+  return `# Python workspace policy (enforced by python-workdir-guard)
+- This working directory must use the project-local virtual environment at ${venv}.
+- Before creating or running Python scripts, ensure ${venv} exists.
+- Install dependencies only with the virtualenv Python, e.g. ${d.posix} -m pip install <package> or ${d.windows} -m pip install <package>.
+- Never use global pip installs, pip --user, sudo pip, pipx install, global python -m pip install, or uv pip install --system.
+- Python-based skills under .agents/skills or .pi/skills must also use this workspace virtualenv unless the user explicitly requests an isolated per-skill virtualenv.${
+    process.env.PI_PY_GUARD_BUNDLED_PYTHON
+      ? `\n- App-bundled skills with pre-installed dependencies (e.g. ppt-master) run on the trusted bundled interpreter: invoke their scripts as \`$PI_BUNDLED_PYTHON <script>\` (this is allowed and needs no virtualenv or pip install).`
+      : ""
+  }`;
+}
+
 // === 桌面运行时段（仅在 Pi Agent 桌面壳内注入）===========================
 // 唯一没被别处覆盖的认知：pi 跑在桌面 app 里、Node+Python 已内置。技能清单由 pi
 // 原生注入、venv/$PI_BUNDLED_PYTHON 由 python-workdir-guard 注入——此处不重复，只
@@ -184,6 +219,7 @@ export default function (pi: ExtensionAPI) {
       if (!off(process.env.PI_GP_TOOLS)) {
         sections.push(toolsSection(event.systemPromptOptions?.selectedTools));
       }
+      if (!off(process.env.PI_GP_PYTHON)) sections.push(pythonSection(ctx.cwd));
 
       if (sections.length > 0) {
         prompt += `\n\n${sections.join("\n\n")}`;
@@ -214,6 +250,7 @@ export default function (pi: ExtensionAPI) {
         off(process.env.PI_GP_FAITHFUL) ? "(faithful 关闭)" : FAITHFUL,
         off(process.env.PI_GP_COMMS) ? "(comms 关闭)" : COMMS,
         off(process.env.PI_GP_TOOLS) ? "(tools 关闭)" : toolsSection(undefined),
+        off(process.env.PI_GP_PYTHON) ? "(python 关闭)" : pythonSection(ctx.cwd),
       ].join("\n");
       ctx.ui.notify(preview, "info");
     },

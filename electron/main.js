@@ -10,9 +10,17 @@
  *    @earendil-works/pi-coding-agent dependency) lives in a WRITABLE per-user
  *    runtime dir. A seed copy is shipped in the app and copied out on first run
  *    (so first launch works offline).
- *  - "Check for updates" runs `npm install @agegr/pi-web@latest` in that runtime
- *    dir using the bundled npm — updating pi-web + the agent SDK without a
- *    rebuild and without republishing this desktop app.
+ *  - "Check for updates" installs `@agegr/pi-web@latest` with the bundled npm —
+ *    updating pi-web + the agent SDK without a rebuild and without republishing
+ *    this desktop app. The install goes into a STAGING dir and is swapped into
+ *    place by a directory rename only after it passes verification, so an
+ *    interrupted update can no longer damage the runtime that currently works
+ *    (see runtime-guard.js — this replaced an in-place install that had
+ *    corrupted the runtime twice).
+ *  - Every boot verifies the runtime's native modules actually load before
+ *    starting the server, and repairs a torn install through that same atomic
+ *    path. Both entry points share one lock, so a self-heal and an update check
+ *    can never run at the same time.
  *  - The Next.js server is launched hidden (no console window) on a random
  *    127.0.0.1 port and shown in a native window.
  */
@@ -24,8 +32,10 @@ const fs = require("fs");
 const net = require("net");
 const http = require("http");
 const updater = require("./updater");
+const runtimeGuard = require("./runtime-guard");
 const dashboard = require("./features/dashboard");
 const directoryPicker = require("./features/directory-picker");
+const extensionsManager = require("./features/extensions-manager");
 
 const isWindows = process.platform === "win32";
 const REGISTRY = process.env.PI_WEB_REGISTRY || "https://registry.npmmirror.com";
@@ -146,6 +156,64 @@ function updaterCtx() {
   };
 }
 
+/**
+ * Context for runtime-guard.js — the updater context plus the two things the
+ * guard needs but must not import itself: a logger, and an install function
+ * bound to the bundled npm. Keeping `installInto` injected here means the guard
+ * has no opinion about HOW packages arrive, only about verifying the result and
+ * swapping it in atomically.
+ */
+function guardCtx(overrides = {}) {
+  const base = updaterCtx();
+  return {
+    ...base,
+    dbg,
+    installInto: (dir, spec, onProgress) => updater.installInto(base, dir, spec, onProgress),
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Runtime write lock
+// ---------------------------------------------------------------------------
+// EVERY path that mutates the runtime tree — the boot-time self-heal, the
+// automatic update check, and the manual "更新并重启" — goes through this gate.
+// Two of them running at once would race on the same staging dir and the same
+// swap journal, so overlapping requests are dropped rather than queued: the
+// loser has nothing useful to do by the time the winner finishes.
+let runtimeBusy = false;
+// When the runtime was last (re)provisioned. The boot auto-check consults this
+// to avoid immediately re-installing over a self-heal that just finished.
+let lastProvisionMs = 0;
+
+async function withRuntimeLock(label, fn) {
+  if (runtimeBusy) {
+    dbg(`runtime lock held — skipping ${label}`);
+    return { skipped: true };
+  }
+  runtimeBusy = true;
+  dbg(`runtime lock acquired by ${label}`);
+  try {
+    return await fn();
+  } finally {
+    runtimeBusy = false;
+    lastProvisionMs = Date.now();
+    dbg(`runtime lock released by ${label}`);
+  }
+}
+
+/**
+ * Stop the embedded server so its file handles release, letting the directory
+ * rename in the swap succeed. Passed to provisionRuntime, which calls it only
+ * after staging has passed verification — the download itself runs with the old
+ * server still up.
+ */
+async function stopServerForSwap() {
+  stoppingForUpdate = true; // deliberate kill — suppress the crash popup
+  killServer();
+  await new Promise((r) => setTimeout(r, 600)); // let Windows release handles
+}
+
 // ---------------------------------------------------------------------------
 // Runtime seeding (first run copies the bundled seed to a writable dir)
 // ---------------------------------------------------------------------------
@@ -214,33 +282,111 @@ async function ensureRuntime() {
 }
 
 // ---------------------------------------------------------------------------
-// Bundled extensions sync (repo extensions-seed/ is the source of truth)
+// Runtime integrity: crash recovery + boot preflight + self-heal
 // ---------------------------------------------------------------------------
-// Six single-file `.ts` extensions ship with the app. The repo's
-// `extensions-seed/` is their CANONICAL SOURCE — they are developed there, never
-// hand-edited in the data dir. On every launch we sync the bundle into
-// ~/.pi/agent/extensions/ so the deployed copies always match the installed
-// version: each managed file is (over)written whenever its content differs from
-// the bundle, which is what makes the "edit in the repo → reinstall (or re-run)"
-// loop actually deploy changes. The shared node_modules is deployed when missing
-// or when the bundled lockfile changed; at runtime only @modelcontextprotocol/sdk
-// (+ transitive deps) is needed — pi injects @earendil-works/pi-coding-agent into
-// the extension loader itself, so it is intentionally NOT bundled.
-//
-// Only these managed names are touched (any other file in the dir is left
-// alone), and any failure here is logged and swallowed so it can never block boot.
-const DEFAULT_EXTENSIONS = [
-  "agents-md-injector.ts",
-  "auto-session-title.ts",
-  "claude-md-injector.ts",
-  "general-agent-prompt.ts",
-  "language-guard.ts",
-  "mcp-bridge.ts",
-  "python-workdir-guard.ts",
-  "skill-shell-injection.ts",
-  "variflight-web-search.ts",
-];
+/**
+ * Reconcile an interrupted swap BEFORE anything else looks at the runtime.
+ *
+ * This deliberately runs against both possible runtime locations instead of
+ * asking runtimeDir() where the runtime is, because runtimeDir()'s answer is
+ * not trustworthy yet: it picks the seed dir only `if (fs.existsSync(seed) &&
+ * isWritable(seed))`. A crash between the swap's two renames leaves the seed
+ * dir temporarily absent, so calling runtimeDir() first would silently latch
+ * onto the userData fallback — and then fail to seed from a directory that is
+ * sitting right there in `.runtime-seed.trash`. Recovering first, and caching
+ * nothing until it is done, keeps that from happening.
+ */
+async function recoverRuntimeCandidates() {
+  const ctx = { dbg };
+  const candidates = [seedDir(), path.join(app.getPath("userData"), "runtime")];
+  for (const dir of candidates) {
+    try {
+      const r = await runtimeGuard.recoverInterruptedSwap(ctx, dir);
+      if (r && r.recovered) dbg(`recoverInterruptedSwap(${dir}) -> ${r.action}`);
+    } catch (e) {
+      dbg(`recoverInterruptedSwap(${dir}) failed (non-fatal): ${(e && e.message) || e}`);
+    }
+  }
+}
 
+/**
+ * Boot preflight. Verifies the runtime actually loads and, when it does not,
+ * repairs it through the same atomic path an update uses.
+ *
+ * The self-heal reinstalls the CURRENT version (spec = null, i.e. straight from
+ * the lockfile) rather than jumping to latest: a damaged install is not a
+ * reason to also change versions, and staying put keeps the failure domain
+ * small. If a newer version does exist, the ordinary auto-check picks it up a
+ * few seconds later — through this same lock, so the two never overlap.
+ *
+ * Returns true when the runtime is usable (either it was fine, or it was
+ * repaired). False means the caller should surface a real error.
+ */
+async function ensureRuntimeHealthy() {
+  const ctx = guardCtx();
+  const check = await runtimeGuard.verifyRuntime(ctx, runtimeDir());
+  if (check.ok) {
+    dbg("preflight: runtime verified");
+    return true;
+  }
+
+  const summary = runtimeGuard.describeFailures(check.failures);
+  dbg(`preflight FAILED: ${summary} (healable=${check.healable})`);
+
+  if (!check.healable) {
+    // Broken in a way reinstalling cannot fix (bad ABI, missing system library).
+    // Reinstalling in a loop would waste minutes and still fail, so report it.
+    throw new Error(
+      `运行时组件无法加载：${summary}\n\n` +
+        `这通常不是安装损坏，而是运行环境问题（缺少系统依赖或架构不匹配）。`
+    );
+  }
+
+  // Tell the user why the first launch is slow — a silent multi-minute stall
+  // looks identical to a hang. Its own page rather than updating.html, so a
+  // repair never reads as "you are being upgraded".
+  if (win && !win.isDestroyed()) {
+    win.loadFile(path.join(__dirname, "healing.html")).catch(() => {});
+  }
+
+  const result = await withRuntimeLock("self-heal", () =>
+    runtimeGuard.provisionRuntime(ctx, {
+      spec: null, // reinstall the pinned version, don't sneak in an upgrade
+      reason: "self-heal",
+      stopServer: stopServerForSwap,
+    })
+  );
+  if (result && result.skipped) {
+    // An update is already provisioning a fresh tree; its swap supersedes ours.
+    dbg("preflight: heal skipped, another runtime operation is in flight");
+    return true;
+  }
+
+  stoppingForUpdate = false;
+  notifyUpdate({
+    status: "updated",
+    title: "运行时已修复",
+    message: "检测到安装文件不完整，已自动重新安装",
+    detail: summary,
+  });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Bundled extensions (selective install, user edits win)
+// ---------------------------------------------------------------------------
+// The app ships a catalogue of pi extensions in `extensions-seed/`
+// (extensions-seed/manifest.json is the single source of truth for the managed
+// set). The user picks which ones to install on first run — and can revisit the
+// choice any time via App → 扩展管理…
+//
+// IMPORTANT — this used to overwrite every managed file on every launch ("the
+// repo always wins"), which silently ate edits made in ~/.pi. It no longer
+// does: features/extensions-manager.js remembers the hash of what it wrote and
+// only ever refreshes a file that is still byte-identical to it. See that
+// module's header for the full policy; everything below is just wiring.
+//
+// Any failure here is logged and swallowed so it can never block boot.
 function extensionsSeedDir() {
   return path.join(resourcesBase(), "extensions-seed");
 }
@@ -250,70 +396,23 @@ function piAgentDir() {
   return process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
 }
 
-// Byte-equal compare so we only write when the bundle actually changed (no
-// needless writes / mtime churn on every launch). A missing file compares unequal.
-function sameContent(a, b) {
-  try {
-    const sa = fs.statSync(a);
-    const sb = fs.statSync(b);
-    if (sa.size !== sb.size) return false;
-    return fs.readFileSync(a).equals(fs.readFileSync(b));
-  } catch {
-    return false;
-  }
+function extensionsCtx() {
+  return {
+    seedDir: extensionsSeedDir(),
+    destDir: path.join(piAgentDir(), "extensions"),
+    stateFile: path.join(app.getPath("userData"), "extensions-state.json"),
+    copyDir: copyRuntime,
+    dbg,
+  };
 }
 
+/**
+ * Launch-time sync. Returns true when the user has never chosen (first run or a
+ * wiped state file), in which case the caller shows the picker instead.
+ */
 async function ensureBundledExtensions() {
-  const seed = extensionsSeedDir();
-  if (!fs.existsSync(seed)) {
-    dbg(`extensions seed missing at ${seed} — skipping extension sync`);
-    return;
-  }
-  const dest = path.join(piAgentDir(), "extensions");
-  await fs.promises.mkdir(dest, { recursive: true });
-
-  // Shared deps: deploy when dest has none yet, or when the bundled lockfile
-  // differs from the deployed one (a dependency changed). robocopy /E (in
-  // copyRuntime) overwrites changed files; rare stale leftovers are harmless.
-  const seedNm = path.join(seed, "node_modules");
-  const destNm = path.join(dest, "node_modules");
-  const depsChanged =
-    fs.existsSync(seedNm) &&
-    (!fs.existsSync(destNm) ||
-      !sameContent(path.join(seed, "package-lock.json"), path.join(dest, "package-lock.json")));
-  if (depsChanged) {
-    dbg(`syncing extension deps: ${seedNm} -> ${destNm}`);
-    await fs.promises.mkdir(destNm, { recursive: true });
-    await copyRuntime(seedNm, destNm);
-    for (const manifest of ["package.json", "package-lock.json"]) {
-      const s = path.join(seed, manifest);
-      if (fs.existsSync(s)) {
-        try {
-          fs.copyFileSync(s, path.join(dest, manifest));
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-  }
-
-  // The managed extension files: (over)write whenever content differs from the
-  // bundle. The user no longer edits these in the data dir — the repo wins.
-  let synced = 0;
-  for (const file of DEFAULT_EXTENSIONS) {
-    const s = path.join(seed, file);
-    if (!fs.existsSync(s)) continue;
-    const d = path.join(dest, file);
-    if (sameContent(s, d)) continue;
-    try {
-      fs.copyFileSync(s, d);
-      synced++;
-      dbg(`synced managed extension: ${file}`);
-    } catch (e) {
-      dbg(`failed to sync ${file}: ${(e && e.message) || e}`);
-    }
-  }
-  dbg(`ensureBundledExtensions done; synced ${synced} file(s) to ${dest}`);
+  const result = await extensionsManager.syncOnLaunch(extensionsCtx());
+  return Boolean(result && result.needsPicker);
 }
 
 // ---------------------------------------------------------------------------
@@ -593,11 +692,13 @@ function notifyUpdate(notice) {
 // ---------------------------------------------------------------------------
 // Updates
 // ---------------------------------------------------------------------------
-let updating = false;
+// Serialization now lives in the single `runtimeBusy` gate (see "Runtime write
+// lock" above) so the boot self-heal and an update check share one guard rather
+// than each keeping their own flag.
 let lastKnownLatest = null;
 
 async function checkForUpdates(interactive) {
-  if (updating) return;
+  if (runtimeBusy) return;
   const ctx = updaterCtx();
   const installed = updater.getInstalledVersion(runtimeDir());
 
@@ -658,15 +759,22 @@ async function checkForUpdates(interactive) {
 }
 
 async function applyUpdate(ctx, installed, latest, interactive) {
-  if (updating) return;
-  updating = true;
-  stoppingForUpdate = true; // deliberate stop below — don't show the crash popup
+  if (runtimeBusy) return;
   try {
     if (win) await win.loadFile(path.join(__dirname, "updating.html")).catch(() => {});
-    killServer();
-    await new Promise((r) => setTimeout(r, 600));
-    await updater.installLatest(ctx);
-    // Install done; the new server is brought up via startOrRestartServer, whose
+    // The download now happens into a staging dir with the OLD server still
+    // running, and the swap only occurs once the new tree passes the very same
+    // verification the boot preflight applies. A failed or interrupted update
+    // therefore cannot damage the runtime that is currently working.
+    const result = await withRuntimeLock("update", () =>
+      runtimeGuard.provisionRuntime(guardCtx(), {
+        spec: `${updater.PKG}@latest`,
+        reason: "update",
+        stopServer: stopServerForSwap,
+      })
+    );
+    if (result && result.skipped) return;
+    // Swap committed; the new server comes up via startOrRestartServer, whose
     // own `restarting` guard covers its lifecycle from here on.
     stoppingForUpdate = false;
     await startOrRestartServer();
@@ -682,27 +790,30 @@ async function applyUpdate(ctx, installed, latest, interactive) {
     if (interactive) {
       dialog.showErrorBox("更新失败", String((e && e.stderr) || (e && e.message) || e).slice(-2000));
     }
-    // Recover: bring the (old) server back up, then report on the reloaded page.
+    // The old runtime is untouched by a failed staging install, so recovery is
+    // just getting a server back in front of the user. Most failures now happen
+    // during download, with the old server still running — in that case only the
+    // page needs to go back, not the whole process.
     try {
-      await startOrRestartServer();
+      if (!serverProc || serverProc.killed) await startOrRestartServer();
+      else if (win && serverUrl) await win.loadURL(serverUrl);
     } catch {
       /* ignore */
     }
     notifyUpdate({
       status: "error",
       title: "更新失败",
-      message: "自动更新未完成，已恢复当前版本",
+      message: "自动更新未完成，当前版本未受影响",
       detail: "可稍后通过菜单「检查更新…」重试。",
     });
   } finally {
-    updating = false;
     stoppingForUpdate = false;
   }
 }
 
 // CTA action: user clicked "更新并重启" on a deferred-update notice.
 ipcMain.on("pi-web-desktop:apply-update", () => {
-  if (updating) return;
+  if (runtimeBusy) return;
   const ctx = updaterCtx();
   const installed = updater.getInstalledVersion(runtimeDir());
   applyUpdate(ctx, installed, lastKnownLatest, true).catch(() => {});
@@ -821,6 +932,118 @@ ipcMain.handle("pi-web-desktop:select-directory", (event) => {
 });
 
 // ---------------------------------------------------------------------------
+// Extension picker window (first run + App → 扩展管理…)
+// ---------------------------------------------------------------------------
+// A local file:// window rendering extensions-picker.html through its own
+// preload (extensions-preload.js). On first run boot AWAITS it, so the pi server
+// only starts once the chosen extensions are in place; from the menu it is just
+// a modal over the main window.
+let extPickerWin = null;
+let extPickerResolve = null;
+let extPickerApplied = false;
+
+function openExtensionsPicker(parent) {
+  if (extPickerWin && !extPickerWin.isDestroyed()) {
+    extPickerWin.focus();
+    return Promise.resolve(false);
+  }
+  extPickerApplied = false;
+  extPickerWin = new BrowserWindow({
+    width: 880,
+    height: 720,
+    minWidth: 640,
+    minHeight: 480,
+    parent: parent || undefined,
+    modal: Boolean(parent),
+    backgroundColor: "#0A0A0A",
+    autoHideMenuBar: true,
+    title: "扩展管理",
+    icon: path.join(__dirname, "..", "build", "icon.png"),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, "extensions-preload.js"),
+    },
+  });
+  extPickerWin.loadFile(path.join(__dirname, "extensions-picker.html"));
+
+  // Resolves with "did the user apply a selection?" — closing the window (or
+  // 稍后再说) leaves ~/.pi untouched and, on first run, re-asks next launch.
+  return new Promise((resolve) => {
+    extPickerResolve = resolve;
+    extPickerWin.on("closed", () => {
+      extPickerWin = null;
+      const r = extPickerResolve;
+      extPickerResolve = null;
+      if (r) r(extPickerApplied);
+    });
+  });
+}
+
+ipcMain.handle("pi-web-desktop:ext-status", () => {
+  try {
+    return extensionsManager.computeStatus(extensionsCtx());
+  } catch (e) {
+    dbg(`ext-status error ${(e && e.message) || e}`);
+    return { ok: false, firstRun: true, extensions: [], error: String((e && e.message) || e) };
+  }
+});
+
+ipcMain.handle("pi-web-desktop:ext-apply", async (_event, ids) => {
+  try {
+    const result = await extensionsManager.applySelection(extensionsCtx(), Array.isArray(ids) ? ids : []);
+    extPickerApplied = true;
+    if (extPickerWin && !extPickerWin.isDestroyed()) extPickerWin.close();
+    return { ok: true, ...result };
+  } catch (e) {
+    dbg(`ext-apply error ${(e && e.stack) || e}`);
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+});
+
+ipcMain.handle("pi-web-desktop:ext-restore", (_event, id) => {
+  try {
+    return extensionsManager.restoreFromBundle(extensionsCtx(), String(id));
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+});
+
+ipcMain.handle("pi-web-desktop:ext-open-folder", async () => {
+  const dir = path.join(piAgentDir(), "extensions");
+  try {
+    await fs.promises.mkdir(dir, { recursive: true });
+  } catch {
+    /* ignore */
+  }
+  shell.openPath(dir);
+});
+
+ipcMain.on("pi-web-desktop:ext-cancel", () => {
+  if (extPickerWin && !extPickerWin.isDestroyed()) extPickerWin.close();
+});
+
+// Menu entry: manage the selection after install. pi loads extensions when a
+// session starts, so an applied change needs the embedded server to restart (or
+// a /reload inside pi) before it takes effect — offer that right away.
+async function manageExtensions() {
+  const applied = await openExtensionsPicker(win);
+  if (!applied || !serverProc) return;
+  const { response } = await dialog.showMessageBox(win, {
+    type: "question",
+    buttons: ["立即重启服务", "稍后"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "扩展已更新",
+    message: "扩展改动需要重启内嵌服务才会生效。",
+    detail: "重启会中断正在运行的会话；也可以稍后在 pi 里执行 /reload。",
+  });
+  if (response === 0) {
+    startOrRestartServer().catch((e) => dialog.showErrorBox("重启失败", String(e)));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Window + lifecycle
 // ---------------------------------------------------------------------------
 function createWindow() {
@@ -885,14 +1108,30 @@ async function boot() {
   dbg(`boot start; isPackaged=${app.isPackaged} userData=${app.getPath("userData")}`);
   createWindow();
   try {
+    // Order matters. Recovery runs before ANY call to runtimeDir(), because an
+    // interrupted swap can leave the seed dir momentarily missing and that
+    // would poison runtimeDir()'s cached choice for the rest of the session.
+    await recoverRuntimeCandidates();
     dbg(`ensureRuntime; seedDir=${seedDir()} runtimeDir=${runtimeDir()}`);
     const v = await ensureRuntime();
     dbg(`runtime ready v=${v}`);
     console.log(`[pi-web-desktop] runtime ready, pi-web ${v}`);
-    // Sync the bundled extensions (repo extensions-seed/ is the source of truth)
-    // into ~/.pi before the server starts. Non-fatal: never block boot.
+    // Preflight: the runtime EXISTS (ensureRuntime) — but does it actually
+    // load? Repairs itself if not, so a torn install no longer surfaces as an
+    // opaque "server not ready in time" sixty seconds later.
+    await ensureRuntimeHealthy();
+    // Extensions. First run has no recorded selection, so we ask which ones to
+    // install and AWAIT the picker — the server must start with the chosen set
+    // in place. Afterwards this is a non-destructive sync that never overwrites
+    // a file the user edited. Non-fatal: never block boot.
     try {
-      await ensureBundledExtensions();
+      const needsPicker = await ensureBundledExtensions();
+      if (needsPicker) {
+        dbg("no extension selection recorded — showing the first-run picker");
+        const applied = await openExtensionsPicker(win);
+        // Dismissed without choosing: install nothing now, ask again next launch.
+        if (!applied) dbg("first-run extension picker dismissed — nothing deployed");
+      }
     } catch (e) {
       dbg(`ensureBundledExtensions error (non-fatal): ${(e && e.stack) || e}`);
     }
@@ -906,7 +1145,17 @@ async function boot() {
     await startOrRestartServer();
     dbg("startOrRestartServer returned ok");
     if (AUTO_CHECK) {
-      setTimeout(() => checkForUpdates(false).catch(() => {}), 5000);
+      setTimeout(() => {
+        // Skip when a self-heal just reinstalled the runtime: the user has
+        // already waited through one install, and an upgrade can wait for the
+        // next launch. (The lock would serialize them anyway — this is about
+        // not making them sit through two in a row.)
+        if (lastProvisionMs && Date.now() - lastProvisionMs < 120000) {
+          dbg("auto update check skipped — runtime was just provisioned");
+          return;
+        }
+        checkForUpdates(false).catch(() => {});
+      }, 5000);
     }
   } catch (err) {
     dbg(`BOOT ERROR ${(err && err.stack) || err}`);
@@ -952,6 +1201,10 @@ function buildMenu() {
         {
           label: "检查更新…",
           click: () => checkForUpdates(true),
+        },
+        {
+          label: "扩展管理…",
+          click: () => manageExtensions(),
         },
         {
           label: "重新加载",

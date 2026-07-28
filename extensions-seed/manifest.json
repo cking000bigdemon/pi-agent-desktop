@@ -1,0 +1,104 @@
+{
+  "$comment": [
+    "Catalog of the pi extensions bundled with Pi Agent Desktop.",
+    "Drives BOTH the first-run / menu extension picker UI and the launch-time sync",
+    "in electron/features/extensions-manager.js — it is the single source of truth",
+    "for the managed set (main.js no longer hardcodes a file list).",
+    "",
+    "Fields:",
+    "  id          stable key used in the persisted selection state (never rename)",
+    "  file        file name under extensions-seed/ and ~/.pi/agent/extensions/",
+    "  name        Chinese display name shown in the picker",
+    "  summary     one-line pitch (picker list)",
+    "  description longer explanation (picker detail line)",
+    "  default     pre-checked on first run; also auto-installed when a NEW app",
+    "              version adds an extension the user has never seen",
+    "  deps        npm packages this extension needs at runtime. The shared",
+    "              extensions node_modules is only deployed when at least one",
+    "              SELECTED extension declares deps (skips ~20MB otherwise)."
+  ],
+  "version": 1,
+  "extensions": [
+    {
+      "id": "general-agent-prompt",
+      "file": "general-agent-prompt.ts",
+      "name": "通用 Agent 人设",
+      "summary": "把 pi 的「编码助手」身份改写为通用 agent，并追加通用纪律",
+      "description": "重写 system prompt 的开头身份（编码助手 → 通用型 agent），并追加环境探测、危险操作确认、忠实工作、沟通风格（默认中文回复）、工具卫生、桌面运行时说明、工作区 Python 策略等领域无关的通用段落。各段可用 PI_GP_* 环境变量单独关闭。",
+      "default": true,
+      "deps": []
+    },
+    {
+      "id": "language-guard",
+      "file": "language-guard.ts",
+      "name": "中文语言守卫",
+      "summary": "回复漂移成非中文时中断并重发，强制简体中文",
+      "description": "对模型输出做实义字符统计（剔除代码块／URL／路径／技术标识符），一旦判定「非中文主导」就中断当前流，注入中文语言要求并重新开始原始任务。任何非中文语种漂移都会被拦截，中文夹少量英文术语不会误伤。",
+      "default": true,
+      "deps": []
+    },
+    {
+      "id": "agents-md-injector",
+      "file": "agents-md-injector.ts",
+      "name": "AGENTS.md 目录上下文注入",
+      "summary": "读写文件时自动注入所在目录链上的 AGENTS.md",
+      "description": "监听 read/write/edit/ls/grep/find 等文件类工具调用，从目标目录向上收集 AGENTS.md 并按外层→内层注入会话，每个文件每会话只注入一次，/reload 后仍保留已注入集合。灵感来自 Claude Code 的 PreToolUse hook。",
+      "default": true,
+      "deps": []
+    },
+    {
+      "id": "claude-md-injector",
+      "file": "claude-md-injector.ts",
+      "name": "CLAUDE.md 子目录注入",
+      "summary": "补齐 pi 原生只向上找、不向下找 CLAUDE.md 的空缺",
+      "description": "pi 原生只在 cwd 及其祖先目录里加载首个 AGENTS.md／CLAUDE.md，子目录的 CLAUDE.md 永远不会被加载。本扩展为 Claude Code 维护的仓库补上这一段；同一目录若已有 AGENTS.md 则让位给 AGENTS.md，不会重复注入。",
+      "default": true,
+      "deps": []
+    },
+    {
+      "id": "mcp-bridge",
+      "file": "mcp-bridge.ts",
+      "name": "MCP 桥接（惰性加载）",
+      "summary": "把 mcp.json 里的 MCP server 工具注册进 pi",
+      "description": "pi 原生不做 MCP。本扩展扮演 MCP 客户端，连接 ~/.pi/agent/mcp.json 配置的 server，并以 mcp__<server>__<tool> 命名注册工具（沿用 Claude Code 约定），支持 stdio / http / sse。惰性加载版：默认只暴露 mcp_search_tools，按需激活，也可用 /mcp-load 手动加载。需要 @modelcontextprotocol/sdk（随应用打包）。",
+      "default": true,
+      "deps": ["@modelcontextprotocol/sdk"]
+    },
+    {
+      "id": "python-workdir-guard",
+      "file": "python-workdir-guard.ts",
+      "name": "Python 工作区守卫",
+      "summary": "自动建 .venv，并禁止全局 python / pip",
+      "description": "首次使用某个工作目录时用内置 Python 创建项目级 .venv；随后拦截 shell 调用，强制 Python 脚本与依赖安装走项目 venv（含 .agents/skills、.pi/skills 下的 Python 技能），阻断全局 pip / 全局解释器。应用内置的 Python 被单独放行，供 ppt-master 等自带技能使用。",
+      "default": true,
+      "deps": []
+    },
+    {
+      "id": "skill-shell-injection",
+      "file": "skill-shell-injection.ts",
+      "name": "技能动态上下文注入",
+      "summary": "SKILL.md 里的 !`cmd` 在送进模型前先执行并内联结果",
+      "description": "移植 Claude Code 的 promptShellExecution：技能内容加载时先在 shell 里执行内嵌命令（行内 !`cmd` 与 ```! 代码块），把 stdout 内联替换进内容再交给模型。带受信根目录白名单、会话级幂等 memo、单次替换（不二次扫描）等安全约束。",
+      "default": true,
+      "deps": []
+    },
+    {
+      "id": "variflight-web-search",
+      "file": "variflight-web-search.ts",
+      "name": "联网搜索（VariFlight / Perplexity）",
+      "summary": "三个互补的联网搜索工具，按成本分级",
+      "description": "补齐 pi 不原生支持的服务端联网搜索：variflight_web_search（免费，走 VariFlight AI 网关 Responses API 的内置 web_search，返回带来源的结论）、perplexity_search（$0.005/次，返回结构化 ranked results）、perplexity_pro_search（$0.008/次 + token 费，Sonar Pro 多步深度检索）。凭证读 models.json 已配置的 provider 或 PERPLEXITY_API_KEY，不新增密钥。",
+      "default": true,
+      "deps": []
+    },
+    {
+      "id": "auto-session-title",
+      "file": "auto-session-title.ts",
+      "name": "会话自动命名",
+      "summary": "用首个提问自动生成会话标题",
+      "description": "会话开始后拿用户的第一条提问起一个简短标题（子 pi 进程生成，失败时回退到截断首句），省去手动命名。",
+      "default": true,
+      "deps": []
+    }
+  ]
+}
