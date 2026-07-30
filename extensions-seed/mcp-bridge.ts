@@ -5,11 +5,26 @@
  * MCP server,把它们的工具注册成 pi 自定义工具(命名 mcp__<server>__<tool>,沿用
  * Claude Code 的约定),LLM 即可直接调用。退出时关闭连接,避免孤儿子进程。
  *
- * 支持 transport: stdio / http(StreamableHTTP) / sse。
+ * 支持 transport: stdio / http(StreamableHTTP) / sse(已废弃,见下)。
+ *
+ * 协议版本(2026-07-28 起):
+ *   MCP 2026-07-28 把协议改成了无状态(取消 initialize/initialized 握手与
+ *   Mcp-Session-Id,改为每个请求在 _meta 里自带协议版本与客户端能力,能力发现走
+ *   server/discover)。本扩展默认以 auto 模式连接:先用 server/discover 探测,探到
+ *   新协议就走新协议,探不到就退回 2025 版 initialize 握手,新旧 server 都能连。
+ *   用 PI_MCP_PROTOCOL / 单服 protocol 字段可改成 legacy 或钉死某个版本。
+ *
+ *   同版本还把服务端反向请求(elicitation / sampling / roots)换成了 MRTR
+ *   (Multi Round-Trip Requests):server 返回 resultType:"input_required",客户端
+ *   补上 inputResponses 重发原请求。SDK 会自动跑这套循环,并回调本扩展注册的
+ *   elicitation 处理器 —— 即工具执行到一半要用户补参数/确认时,pi 会弹对话框
+ *   (见 PI_MCP_ELICIT)。sampling / roots 已被官方标记废弃,本扩展不实现。
  *
  * 依赖(必须先装,否则 jiti 加载失败):
  *   在 ~/.pi/agent/extensions/ 目录执行:
- *     npm install @modelcontextprotocol/sdk
+ *     npm install @modelcontextprotocol/client        # SDK v2,支持 2026-07-28
+ *   仍装着旧的 @modelcontextprotocol/sdk(v1.x)也能跑:自动回退,但只能连 2025 版
+ *   协议的 server,且没有 elicitation 支持。
  *
  * 配置文件 ~/.pi/agent/mcp.json(或用 PI_MCP_CONFIG 指定其它路径):
  *   {
@@ -30,6 +45,9 @@
  *     cwd: "<path>"    stdio 子进程工作目录
  *     headers: {...}   http/sse 请求头
  *     timeout: <ms>    该 server 的连接超时,覆盖全局默认 15s
+ *     protocol: "auto" | "legacy" | "2026-07-28"   该 server 的协议版本策略,覆盖
+ *                      PI_MCP_PROTOCOL;auto=先探测再决定,legacy=只用 2025 版握手,
+ *                      写具体日期=钉死该版本(连不上就报错,不回退)
  *
  * 开关(环境变量):
  *   PI_MCP_CONFIG=<path>     覆盖 mcp.json 路径
@@ -37,6 +55,9 @@
  *   PI_MCP_INSTRUCTIONS=0    不把各 server 的 instructions 注入 system prompt(默认注入)
  *   PI_MCP_TIMEOUT=<ms>      每个 server 的连接超时,默认 15000;超时记为失败,不阻塞启动
  *   PI_MCP_LAZY=0            关闭惰性加载,所有 MCP 工具开机即激活(旧行为)
+ *   PI_MCP_PROTOCOL=<mode>   全局协议策略,默认 auto;可填 legacy 或 2026-07-28 这样的版本号
+ *   PI_MCP_ELICIT=0          关闭 elicitation:server 中途要用户补参数时直接拒绝(默认弹框询问)
+ *   PI_MCP_ELICIT_TIMEOUT=<ms>  单个 elicitation 对话框的超时,默认 120000
  *
  * 惰性加载(默认开):
  *   所有 MCP 工具照旧注册,但默认不激活(不进上下文);仅保留加载器工具
@@ -49,10 +70,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -86,25 +103,84 @@ function loadServers(): Record<string, any> {
   }
 }
 
-function makeTransport(cfg: any): any {
+// ---------------------------------------------------------------------------
+// SDK 装载:优先 v2(@modelcontextprotocol/client,支持 2026-07-28),
+// 回退 v1(@modelcontextprotocol/sdk,只有 2025 版协议)
+// ---------------------------------------------------------------------------
+
+type Sdk = {
+  v2: boolean;
+  Client: any;
+  StdioClientTransport: any;
+  SSEClientTransport: any;
+  StreamableHTTPClientTransport: any;
+  note?: string; // 回退原因,启动时提示用户
+};
+
+async function loadSdk(): Promise<Sdk> {
+  let v2Error = "";
+  try {
+    const core: any = await import("@modelcontextprotocol/client");
+    const stdio: any = await import("@modelcontextprotocol/client/stdio");
+    return {
+      v2: true,
+      Client: core.Client,
+      SSEClientTransport: core.SSEClientTransport,
+      StreamableHTTPClientTransport: core.StreamableHTTPClientTransport,
+      StdioClientTransport: stdio.StdioClientTransport,
+    };
+  } catch (e) {
+    v2Error = e instanceof Error ? e.message : String(e);
+  }
+  // 旧安装:@modelcontextprotocol/sdk v1.x
+  const idx: any = await import("@modelcontextprotocol/sdk/client/index.js");
+  const stdio: any = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const sse: any = await import("@modelcontextprotocol/sdk/client/sse.js");
+  const http: any = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+  return {
+    v2: false,
+    Client: idx.Client,
+    StdioClientTransport: stdio.StdioClientTransport,
+    SSEClientTransport: sse.SSEClientTransport,
+    StreamableHTTPClientTransport: http.StreamableHTTPClientTransport,
+    note:
+      `MCP: 未加载到 SDK v2(@modelcontextprotocol/client),已回退旧版 SDK —— ` +
+      `只能连 2025 版协议的 server,且不支持 elicitation。原因: ${v2Error}`,
+  };
+}
+
+function makeTransport(sdk: Sdk, cfg: any): any {
   const type = cfg.type ?? "stdio";
   if (type === "http") {
     const opts = cfg.headers ? { requestInit: { headers: cfg.headers } } : undefined;
-    return new StreamableHTTPClientTransport(new URL(cfg.url), opts as any);
+    return new sdk.StreamableHTTPClientTransport(new URL(cfg.url), opts as any);
   }
   if (type === "sse") {
     const opts = cfg.headers ? { requestInit: { headers: cfg.headers } } : undefined;
-    return new SSEClientTransport(new URL(cfg.url), opts as any);
+    return new sdk.SSEClientTransport(new URL(cfg.url), opts as any);
   }
   // 默认 stdio。不 spread process.env:SDK 内部会自动合并 getDefaultEnvironment()
   //(PATH 等安全子集)+ 下面的 env(stdio.js:67-69)。塞完整 process.env 会把 pi 的
   // 全部环境(含任何密钥)泄露给每个 MCP 子进程,正好抵消 SDK 的过滤。
-  return new StdioClientTransport({
+  return new sdk.StdioClientTransport({
     command: cfg.command,
     args: cfg.args ?? [],
     env: cfg.env,
     cwd: cfg.cwd,
   });
+}
+
+// 协议策略字符串 → SDK 的 versionNegotiation 选项。
+// auto=探测(新旧都连);legacy=只走 2025 版握手;YYYY-MM-DD=钉死该版本。
+const PROTOCOL_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function negotiationOf(raw: unknown): { mode: any } | undefined {
+  const v = String(raw ?? "").trim().toLowerCase();
+  if (!v) return undefined;
+  if (v === "auto") return { mode: "auto" };
+  if (v === "legacy" || v === "2025") return { mode: "legacy" };
+  if (PROTOCOL_DATE.test(v)) return { mode: { pin: v } };
+  return undefined; // 认不出来 → 交给调用方用默认值
 }
 
 // MCP CallToolResult.content → pi 工具结果 content
@@ -139,7 +215,8 @@ function mapContent(res: any): { content: OutBlock[]; isError: boolean } {
   };
 }
 
-async function listAllTools(client: Client): Promise<any[]> {
+// v2 的无 cursor listTools() 自己走完所有分页;v1 要手动翻。两边都靠 nextCursor 收敛。
+async function listAllTools(client: any): Promise<any[]> {
   const all: any[] = [];
   let cursor: string | undefined;
   do {
@@ -151,11 +228,54 @@ async function listAllTools(client: Client): Promise<any[]> {
 }
 
 // ---------------------------------------------------------------------------
+// elicitation(2026-07-28 起由 MRTR 承载:工具执行到一半回来问用户)
+// ---------------------------------------------------------------------------
+
+// 单选枚举的两种写法:{enum:[...], enumNames?:[...]} / {oneOf:[{const,title}]}
+function singleChoices(schema: any): { value: string; label: string }[] | undefined {
+  if (Array.isArray(schema?.oneOf)) {
+    return schema.oneOf.map((o: any) => ({ value: String(o?.const ?? ""), label: String(o?.title ?? o?.const ?? "") }));
+  }
+  if (Array.isArray(schema?.enum)) {
+    const names = Array.isArray(schema.enumNames) ? schema.enumNames : [];
+    return schema.enum.map((v: any, i: number) => ({ value: String(v), label: String(names[i] ?? v) }));
+  }
+  return undefined;
+}
+
+// 多选枚举:{type:"array", items:{enum:[...]}} / {type:"array", items:{anyOf:[{const,title}]}}
+function multiChoices(schema: any): { value: string; label: string }[] | undefined {
+  if (schema?.type !== "array") return undefined;
+  const items = schema.items ?? {};
+  if (Array.isArray(items.anyOf)) {
+    return items.anyOf.map((o: any) => ({ value: String(o?.const ?? ""), label: String(o?.title ?? o?.const ?? "") }));
+  }
+  if (Array.isArray(items.enum)) {
+    return items.enum.map((v: any) => ({ value: String(v), label: String(v) }));
+  }
+  return undefined;
+}
+
+function fieldLabel(key: string, schema: any): string {
+  const title = String(schema?.title ?? "").trim() || key;
+  const desc = String(schema?.description ?? "").trim();
+  return desc && desc !== title ? `${title} — ${desc}` : title;
+}
+
+// ---------------------------------------------------------------------------
 // extension
 // ---------------------------------------------------------------------------
 
-type ToolEntry = { server: string; tool: string; client: Client; confirm: boolean; eager: boolean };
-type ServerInfo = { name: string; type: string; ok: boolean; toolCount: number; error?: string };
+type ToolEntry = { server: string; tool: string; client: any; confirm: boolean; eager: boolean };
+type ServerInfo = {
+  name: string;
+  type: string;
+  ok: boolean;
+  toolCount: number;
+  error?: string;
+  era?: string; // "modern"(2026-07-28+)/"legacy"(2025 版握手)
+  protocol?: string; // 协商出来的协议版本号
+};
 
 const LOADER_TOOL = "mcp_search_tools";
 
@@ -168,13 +288,40 @@ function isEager(cfg: any, toolName: string): boolean {
 }
 
 export default async function (pi: ExtensionAPI) {
-  const clients: Client[] = [];
+  const clients: any[] = [];
   const registry = new Map<string, ToolEntry>(); // pi 工具名 -> 调用信息
   const serverInfos: ServerInfo[] = [];
   const instructionsBlocks: { server: string; text: string }[] = [];
   const startupLog: string[] = [];
   const confirmAll = process.env.PI_MCP_CONFIRM?.toLowerCase() === "all";
   const lazy = !off(process.env.PI_MCP_LAZY); // 默认开启惰性加载
+  const elicitEnabled = !off(process.env.PI_MCP_ELICIT); // 默认允许 server 中途问用户
+  const elicitTimeout = Number(process.env.PI_MCP_ELICIT_TIMEOUT) > 0 ? Number(process.env.PI_MCP_ELICIT_TIMEOUT) : 120000;
+  // 全局协议策略:默认 auto(先探测,新旧 server 都能连)
+  const defaultNegotiation = negotiationOf(process.env.PI_MCP_PROTOCOL) ?? { mode: "auto" };
+
+  // 最近可用的 ctx(session_start 与每次 execute 都会刷新),两处要用:
+  // ① elicitation 在工具执行中途弹 UI,而 Client 上的处理器拿不到当次调用的 ctx;
+  // ② refreshStatus 在运行时刷新状态栏(激活数实时反映当前真正激活的 MCP 工具)。
+  let uiCtx: ExtensionContext | undefined;
+
+  let sdk: Sdk;
+  try {
+    sdk = await loadSdk();
+    if (sdk.note) startupLog.push(sdk.note);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    pi.on("session_start", async (_event, ctx: ExtensionContext) => {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `MCP 桥接未启用: 找不到 MCP 客户端 SDK。请在 ~/.pi/agent/extensions/ 执行 ` +
+            `npm install @modelcontextprotocol/client\n原因: ${msg}`,
+          "warning",
+        );
+      }
+    });
+    return;
+  }
 
   let servers: Record<string, any> = {};
   try {
@@ -198,17 +345,147 @@ export default async function (pi: ExtensionAPI) {
     }
   }
 
+  // MCP elicitation/create → pi 对话框。无 UI(headless)或被关掉时一律 decline,
+  // 绝不静默编造回答;用户中途取消必填项则整个 elicitation 记为 cancel。
+  async function handleElicit(server: string, params: any): Promise<any> {
+    const ctx = uiCtx;
+    if (!elicitEnabled || !ctx?.hasUI) return { action: "decline" };
+    const dialog = { timeout: elicitTimeout };
+    const message = String(params?.message ?? "").trim();
+
+    // URL 模式:让用户去浏览器里完成,回来点确认
+    if (params?.mode === "url" && params?.url) {
+      const ok = await ctx.ui.confirm(
+        `MCP ${server} 需要你在浏览器中完成操作`,
+        `${message}\n${params.url}\n完成后点确认,放弃点取消。`,
+        dialog,
+      );
+      return { action: ok ? "accept" : "cancel" };
+    }
+
+    const props: Record<string, any> = params?.requestedSchema?.properties ?? {};
+    const required = new Set<string>(params?.requestedSchema?.required ?? []);
+    const keys = Object.keys(props);
+    if (keys.length === 0) {
+      const ok = await ctx.ui.confirm(`MCP ${server} 请求确认`, message || "(无说明)", dialog);
+      return { action: ok ? "accept" : "decline", content: {} };
+    }
+    if (message) ctx.ui.notify(`MCP ${server}: ${message}`, "info");
+
+    const content: Record<string, any> = {};
+    for (const key of keys) {
+      const schema = props[key] ?? {};
+      const label = fieldLabel(key, schema);
+      const isRequired = required.has(key);
+      const title = `MCP ${server}: ${label}${isRequired ? "" : "(可选)"}`;
+
+      // 多选
+      const multi = multiChoices(schema);
+      if (multi) {
+        const DONE = "✓ 完成选择";
+        const picked: string[] = [];
+        const max = Number(schema?.maxItems) > 0 ? Number(schema.maxItems) : Infinity;
+        while (picked.length < max) {
+          const rest = multi.filter((c) => !picked.includes(c.value));
+          if (rest.length === 0) break;
+          const ans = await ctx.ui.select(`${title} — 已选 ${picked.length}`, [...rest.map((c) => c.label), DONE], dialog);
+          if (ans === undefined) return { action: "cancel" };
+          if (ans === DONE) break;
+          const hit = rest.find((c) => c.label === ans);
+          if (hit) picked.push(hit.value);
+        }
+        const min = Number(schema?.minItems) > 0 ? Number(schema.minItems) : (isRequired ? 1 : 0);
+        if (picked.length < min) return { action: "cancel" };
+        if (picked.length > 0 || isRequired) content[key] = picked;
+        continue;
+      }
+
+      // 单选
+      const single = singleChoices(schema);
+      if (single) {
+        const ans = await ctx.ui.select(title, single.map((c) => c.label), dialog);
+        if (ans === undefined) {
+          if (isRequired) return { action: "cancel" };
+          continue;
+        }
+        const hit = single.find((c) => c.label === ans);
+        if (hit) content[key] = hit.value;
+        continue;
+      }
+
+      // 布尔
+      if (schema?.type === "boolean") {
+        content[key] = await ctx.ui.confirm(title, String(schema?.description ?? "确认?"), dialog);
+        continue;
+      }
+
+      // 数字 / 字符串:数字最多重试 3 次,免得一个笔误就把整次调用废掉
+      const numeric = schema?.type === "number" || schema?.type === "integer";
+      const hint = schema?.default !== undefined ? `默认 ${schema.default}` : numeric ? "输入数字" : "";
+      let tries = 0;
+      while (true) {
+        const raw = await ctx.ui.input(title, hint, dialog);
+        if (raw === undefined) {
+          if (isRequired) return { action: "cancel" };
+          break;
+        }
+        const text = raw.trim();
+        if (!text) {
+          if (schema?.default !== undefined) {
+            content[key] = schema.default;
+            break;
+          }
+          if (isRequired) return { action: "cancel" };
+          break;
+        }
+        if (!numeric) {
+          content[key] = text;
+          break;
+        }
+        const num = Number(text);
+        if (Number.isFinite(num) && (schema.type !== "integer" || Number.isInteger(num))) {
+          content[key] = num;
+          break;
+        }
+        if (++tries >= 3) return { action: "cancel" };
+        ctx.ui.notify(`「${text}」不是合法的${schema.type === "integer" ? "整数" : "数字"},请重输`, "warning");
+      }
+    }
+    return { action: "accept", content };
+  }
+
   async function connectServer(server: string, cfg: any): Promise<void> {
     const type = cfg?.type ?? "stdio";
     if (cfg?.disabled) {
       serverInfos.push({ name: server, type, ok: false, toolCount: 0, error: "disabled" });
       return;
     }
-    const client = new Client({ name: "pi-mcp-bridge", version: "0.1.0" }, { capabilities: {} });
+    if (type === "sse") {
+      startupLog.push(`MCP ${server}: sse 传输已在 2026-07-28 中标记废弃,建议改成 "type": "http"(Streamable HTTP)`);
+    }
+    const negotiation = negotiationOf(cfg?.protocol) ?? defaultNegotiation;
+    if (cfg?.protocol && !negotiationOf(cfg.protocol)) {
+      startupLog.push(`MCP ${server}: 认不出 protocol="${cfg.protocol}",已按 ${JSON.stringify(negotiation.mode)} 处理(可填 auto / legacy / 2026-07-28)`);
+    }
+    const client = new sdk.Client(
+      { name: "pi-mcp-bridge", version: "0.2.0" },
+      sdk.v2
+        ? {
+            // 只声明真正实现了的能力(sampling / roots 已被 2026-07-28 标记废弃,不实现)
+            capabilities: elicitEnabled ? { elicitation: {} } : {},
+            versionNegotiation: negotiation,
+            // MRTR:server 返回 input_required 时,SDK 自动回调下面的处理器并重发原请求
+            inputRequired: { autoFulfill: true, maxRounds: 4 },
+          }
+        : { capabilities: {} },
+    );
+    if (sdk.v2 && elicitEnabled) {
+      client.setRequestHandler("elicitation/create", async (request: any) => handleElicit(server, request?.params ?? request));
+    }
     const ms = Number(cfg?.timeout) > 0 ? Number(cfg.timeout) : defaultTimeoutMs;
     try {
       // 加超时:任一 server 挂起也不会卡死 pi 启动(工厂被 pi await)
-      await withTimeout(client.connect(makeTransport(cfg)), ms, `连接 ${server}`);
+      await withTimeout(client.connect(makeTransport(sdk, cfg)), ms, `连接 ${server}`);
       clients.push(client);
 
       // server 自报的 instructions(若有)→ 收集,稍后注入 system prompt
@@ -233,13 +510,14 @@ export default async function (pi: ExtensionAPI) {
           description: t.description ?? t.name,
           // pi-ai 校验双路径支持纯 JSON Schema(validation.js),MCP inputSchema 原样可用
           parameters: t.inputSchema ?? { type: "object", properties: {} },
-          async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
+          async execute(_toolCallId: string, params: any, signal?: AbortSignal, _onUpdate?: unknown, ctx?: ExtensionContext) {
+            if (ctx) uiCtx = ctx; // elicitation 要用当次调用的 UI
             try {
-              const res = await client.callTool(
-                { name: t.name, arguments: params ?? {} },
-                undefined,
-                signal ? { signal } : undefined,
-              );
+              const opts = signal ? { signal } : undefined;
+              // v2 的 callTool 是 (params, options);v1 中间还夹着一个 resultSchema
+              const res = sdk.v2
+                ? await client.callTool({ name: t.name, arguments: params ?? {} }, opts)
+                : await client.callTool({ name: t.name, arguments: params ?? {} }, undefined, opts);
               return mapContent(res);
             } catch (e) {
               return {
@@ -251,7 +529,14 @@ export default async function (pi: ExtensionAPI) {
         });
         registered++;
       }
-      serverInfos.push({ name: server, type, ok: true, toolCount: registered });
+      serverInfos.push({
+        name: server,
+        type,
+        ok: true,
+        toolCount: registered,
+        era: client.getProtocolEra?.(),
+        protocol: client.getNegotiatedProtocolVersion?.(),
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       serverInfos.push({ name: server, type, ok: false, toolCount: 0, error: msg });
@@ -272,11 +557,30 @@ export default async function (pi: ExtensionAPI) {
   // 惰性隐藏的工具集合(需要靠 mcp_search_tools / mcp-load 激活)
   const lazyNames = () => (lazy ? allMcpNames().filter((n) => !registry.get(n)!.eager) : []);
 
+  // 当前真正激活的 MCP 工具数(含运行时被 mcp_search_tools / mcp-load 动态激活的);
+  // 不含 loader 工具,因为它不在 registry 里
+  const activeMcpCount = () => pi.getActiveTools().filter((n) => registry.has(n)).length;
+
+  // 重算并刷新状态栏。激活数为实时值,惰性 = 总数 - 激活;非惰性模式沿用简洁文案
+  function refreshStatus(): void {
+    if (!uiCtx?.hasUI) return;
+    const serverCount = serverInfos.filter((s) => s.ok).length;
+    const total = registry.size;
+    const active = activeMcpCount();
+    const status = lazy
+      ? `MCP: ${serverCount} server / ${total} tools (${active} 激活, ${total - active} 惰性)`
+      : `MCP: ${serverCount} server / ${total} tools`;
+    uiCtx.ui.setStatus("mcp", status);
+  }
+
   // 纯新增地激活一批工具名,返回真正新加的名字
   function activate(names: string[]): string[] {
     const active = pi.getActiveTools();
     const added = names.filter((n) => registry.has(n) && !active.includes(n));
-    if (added.length > 0) pi.setActiveTools([...new Set([...active, ...added])]);
+    if (added.length > 0) {
+      pi.setActiveTools([...new Set([...active, ...added])]);
+      refreshStatus(); // 动态激活后立即刷新状态栏计数
+    }
     return added;
   }
 
@@ -347,20 +651,19 @@ export default async function (pi: ExtensionAPI) {
 
   // 启动后把连接结果反馈给用户(工厂里没有 ctx,放到 session_start)
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
+    uiCtx = ctx;
     applyInitialActive();
     const ok = serverInfos.filter((s) => s.ok);
-    const total = ok.reduce((n, s) => n + s.toolCount, 0);
-    const eagerCount = eagerNames().length;
+    const total = registry.size;
     const lazyCount = lazyNames().length;
     if (ctx.hasUI) {
-      const status = lazy
-        ? `MCP: ${ok.length} server / ${total} tools (${eagerCount} 激活, ${lazyCount} 惰性)`
-        : `MCP: ${ok.length} server / ${total} tools`;
-      ctx.ui.setStatus("mcp", status);
+      refreshStatus(); // 初始激活数(= eager 数),之后动态激活会实时更新
       if (ok.length > 0) {
+        const modern = ok.filter((s) => s.era === "modern").length;
+        const era = sdk.v2 && modern > 0 ? `,其中 ${modern} 个走 2026-07-28 新协议` : "";
         const msg = lazy
-          ? `MCP 已桥接 ${ok.length} 个 server,共 ${total} 个工具(${lazyCount} 个惰性加载,需时由 ${LOADER_TOOL} 激活)`
-          : `MCP 已桥接 ${ok.length} 个 server,共 ${total} 个工具`;
+          ? `MCP 已桥接 ${ok.length} 个 server,共 ${total} 个工具(${lazyCount} 个惰性加载,需时由 ${LOADER_TOOL} 激活)${era}`
+          : `MCP 已桥接 ${ok.length} 个 server,共 ${total} 个工具${era}`;
         ctx.ui.notify(msg, "info");
       }
       for (const line of startupLog) ctx.ui.notify(line, "warning");
@@ -414,12 +717,19 @@ export default async function (pi: ExtensionAPI) {
   pi.registerCommand("mcp", {
     description: "列出已桥接的 MCP server 与工具",
     handler: async (_args, ctx) => {
-      const lines: string[] = [`配置文件: ${configPath()}`, ""];
+      const lines: string[] = [
+        `配置文件: ${configPath()}`,
+        `SDK: ${sdk.v2 ? "@modelcontextprotocol/client v2(支持 2026-07-28)" : "@modelcontextprotocol/sdk v1(仅 2025 版协议)"}` +
+          `  协议策略: ${JSON.stringify(defaultNegotiation.mode)}` +
+          `  elicitation: ${sdk.v2 && elicitEnabled ? "开" : "关"}`,
+        "",
+      ];
       if (serverInfos.length === 0) {
         lines.push("(mcp.json 未配置任何 server)");
       } else {
         for (const s of serverInfos) {
-          lines.push(`${s.ok ? "✓" : "✗"} ${s.name} [${s.type}] — ${s.ok ? `${s.toolCount} tools` : s.error}`);
+          const proto = s.ok && s.protocol ? ` ${s.protocol}${s.era === "modern" ? " (stateless)" : ""}` : "";
+          lines.push(`${s.ok ? "✓" : "✗"} ${s.name} [${s.type}${proto}] — ${s.ok ? `${s.toolCount} tools` : s.error}`);
           if (s.ok) {
             const active = new Set(pi.getActiveTools());
             for (const [name, e] of registry) {

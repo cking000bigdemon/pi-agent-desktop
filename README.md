@@ -91,7 +91,7 @@ pi-web-desktop/
 | 已装且**被你改过** | 原样保留，仅标记「有新版可用」 |
 | 手动删掉某个已勾选的扩展 | 下次启动补装（想彻底不要就在选择器里取消勾选） |
 | 新版本新增的默认扩展 | 自动装上（纯新增文件，不会覆盖任何东西） |
-| 依赖 `node_modules` | 只在**有选中的扩展声明依赖**时才部署（目前只有 `mcp-bridge` 需要 `@modelcontextprotocol/sdk`，约 20MB），缺失或 lockfile 变化时刷新 |
+| 依赖 `node_modules` | 只在**有选中的扩展声明依赖**时才部署（目前只有 `mcp-bridge` 需要 `@modelcontextprotocol/client`，约 15MB），缺失或 lockfile 变化时刷新 |
 
 判定「改没改过」用的是**忽略换行符**的内容哈希（`core.autocrlf` 会把种子检出成 CRLF，纯换行差异不能算用户改动）。选择与部署记录写在 `userData/extensions-state.json`，`~/.pi` 里不留任何附加文件。实现见 `electron/features/extensions-manager.js`（策略注释在文件头）、`electron/extensions-picker.html`、`electron/extensions-preload.js`。
 
@@ -104,12 +104,12 @@ pi-web-desktop/
 | `claude-md-injector` | `agents-md-injector` 姊妹版：把**子目录** CLAUDE.md 注入会话上下文（根目录 pi 原生已加载；目录同时有 AGENTS.md 时让位，不重复注入） |
 | `general-agent-prompt` | 通用 agent 系统提示增强 |
 | `language-guard` | **语言守卫**：检测 assistant 回复语言漂移（非中文主导即拦截），中断后注入中文要求并自动重发原任务；可选子 pi 复核，防死循环限重启次数 |
-| `mcp-bridge` | 桥接 `mcp.json` 里的 MCP server（stdio/sse/http）；MCP 工具默认**惰性加载**（`mcp_search_tools` 按需搜索激活，或 `/mcp-load` 手动），支持 eager/confirm/cwd 等单服配置 |
+| `mcp-bridge` | 桥接 `mcp.json` 里的 MCP server（stdio/sse/http）；MCP 工具默认**惰性加载**（`mcp_search_tools` 按需搜索激活，或 `/mcp-load` 手动），支持 eager/confirm/cwd 等单服配置。协议默认 `auto`：先 `server/discover` 探测，2026-07-28 无状态协议与 2025 版 server 通吃（`PI_MCP_PROTOCOL` 可改 legacy 或钉版本）；server 中途要用户补参数走 MRTR，弹 pi 对话框回填（`PI_MCP_ELICIT=0` 关） |
 | `python-workdir-guard` | **Python 工作目录守卫**：自动建 `.venv`、强制 Python 走 `.venv`（见下「零依赖 Python」） |
 | `skill-shell-injection` | **Skill 动态上下文注入**：补上 Pi 原生没有的 Claude Code 式 `` !\`cmd\` `` / ```` ```! ```` 语法——SKILL.md/prompt 被加载时在 shell 执行内嵌命令、把输出内联替换进内容；钩 `read` 自动生效，另提供 `/skillx <name>` 直调 |
 | `variflight-web-search` | **联网搜索**（三个互补工具，按成本分级）：`variflight_web_search`（免费，VariFlight AI 网关 Responses API + 内置 web_search，返回带来源的结论）、`perplexity_search`（$0.005/次，结构化 ranked results）、`perplexity_pro_search`（$0.008/次 + token 费，Sonar Pro 多步深度检索） |
 
-运行时 `@earendil-works/pi-coding-agent` 由 pi 注入扩展加载器，**不打包**；唯一需打包的依赖是 `@modelcontextprotocol/sdk`（mcp-bridge 用），由 `npm run seed:extensions` 准备。
+运行时 `@earendil-works/pi-coding-agent` 由 pi 注入扩展加载器，**不打包**；唯一需打包的依赖是 `@modelcontextprotocol/client`（MCP SDK v2，mcp-bridge 用），由 `npm run seed:extensions` 准备。
 
 ### 默认技能（`skills-seed/` → `~/.pi/agent/skills/`）
 

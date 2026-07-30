@@ -60,9 +60,9 @@
       "file": "mcp-bridge.ts",
       "name": "MCP 桥接（惰性加载）",
       "summary": "把 mcp.json 里的 MCP server 工具注册进 pi",
-      "description": "pi 原生不做 MCP。本扩展扮演 MCP 客户端，连接 ~/.pi/agent/mcp.json 配置的 server，并以 mcp__<server>__<tool> 命名注册工具（沿用 Claude Code 约定），支持 stdio / http / sse。惰性加载版：默认只暴露 mcp_search_tools，按需激活，也可用 /mcp-load 手动加载。需要 @modelcontextprotocol/sdk（随应用打包）。",
+      "description": "pi 原生不做 MCP。本扩展扮演 MCP 客户端，连接 ~/.pi/agent/mcp.json 配置的 server，并以 mcp__<server>__<tool> 命名注册工具（沿用 Claude Code 约定），支持 stdio / http / sse。支持 2026-07-28 无状态协议（server/discover 自动探测，新旧 server 通吃；工具中途要用户补参数走 MRTR 弹框）。惰性加载版：默认只暴露 mcp_search_tools，按需激活，也可用 /mcp-load 手动加载。需要 @modelcontextprotocol/client（随应用打包）。",
       "default": true,
-      "deps": ["@modelcontextprotocol/sdk"]
+      "deps": ["@modelcontextprotocol/client"]
     },
     {
       "id": "python-workdir-guard",
