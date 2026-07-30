@@ -34,6 +34,7 @@ const http = require("http");
 const updater = require("./updater");
 const runtimeGuard = require("./runtime-guard");
 const dashboard = require("./features/dashboard");
+const subagents = require("./features/subagents");
 const directoryPicker = require("./features/directory-picker");
 const extensionsManager = require("./features/extensions-manager");
 
@@ -917,6 +918,30 @@ ipcMain.handle("pi-web-desktop:dashboard-status", async () => {
       subagents: { running: 0, runningList: [], doneSession: 0, failedSession: 0, recent: [] },
       error: String((e && e.message) || e),
     };
+  }
+});
+
+// Stop button on the Sub-agents popover. Forced subtree termination — see the
+// header of features/subagents.js for why a graceful interrupt isn't available.
+// The pid is re-validated against a fresh process snapshot inside stopSubagents
+// (it must still be a pi-cli process under OUR server), so a stale or forged pid
+// from the renderer can't be turned into a kill of an arbitrary process.
+ipcMain.handle("pi-web-desktop:subagent-stop", async (_event, payload) => {
+  const req = payload && typeof payload === "object" ? payload : {};
+  const pids = req.all === true ? "all" : [Number(req.pid)];
+  try {
+    const res = await subagents.stopSubagents({
+      pids,
+      serverPid: serverProc && !serverProc.killed ? serverProc.pid : undefined,
+    });
+    dbg(
+      `subagent-stop ${req.all ? "all" : `pid ${req.pid}`} → ok=${res.ok} ` +
+        `stopped=[${res.stopped.join(",")}] skipped=${res.skipped.length}${res.error ? ` error=${res.error}` : ""}`
+    );
+    return res;
+  } catch (e) {
+    dbg(`subagent-stop error ${(e && e.stack) || e}`);
+    return { ok: false, stopped: [], skipped: [], error: String((e && e.message) || e) };
   }
 });
 

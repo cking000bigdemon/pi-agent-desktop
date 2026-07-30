@@ -29,6 +29,19 @@
  *     session" / "failed" counts and the recent list.
  *
  * Never throws — always returns a partial result plus an `error` string.
+ *
+ * STOPPING a run (stopSubagents, added 2026-07-30): forced termination is the
+ * only option we have. pi-subagents does implement a graceful interrupt — signal
+ * the async runner with SIGUSR2/SIGBREAK and it flips the run to "paused" so it
+ * can be resumed (runs/background/subagent-runner.ts `interruptRunner`) — but on
+ * Windows `process.kill(pid, "SIGBREAK")` fails with ENOSYS (libuv cannot send
+ * console-control signals cross-process; verified 2026-07-30), so that path is
+ * dead on this platform for the package itself, let alone for us. We therefore
+ * kill the process subtree. The package converges on its own afterwards: its
+ * stale-run reconciler sees a non-terminal status.json whose pid is dead and
+ * rewrites the run as failed (runs/background/stale-run-reconciler.ts), and a
+ * foreground run's parent observes the child's abnormal exit and reports a
+ * failed step. Nothing is left claiming to be "running".
  */
 
 const fs = require("fs");
@@ -159,6 +172,35 @@ function listProcesses() {
       );
     }
   });
+}
+
+/**
+ * Pids descended from rootPid grouped by depth, deepest first, INCLUDING
+ * rootPid itself as the last entry. Used when terminating: killing leaves before
+ * their parents keeps a supervisor from noticing a dead child and respawning,
+ * and stops the parent from being reaped before we can enumerate under it.
+ */
+function killOrder(procs, rootPid) {
+  const childrenByParent = new Map();
+  for (const p of procs) {
+    if (!childrenByParent.has(p.ppid)) childrenByParent.set(p.ppid, []);
+    childrenByParent.get(p.ppid).push(p);
+  }
+  const levels = [[rootPid]];
+  const seen = new Set([rootPid]);
+  while (true) {
+    const next = [];
+    for (const parent of levels[levels.length - 1]) {
+      for (const child of childrenByParent.get(parent) || []) {
+        if (seen.has(child.pid)) continue; // pid-reuse cycle guard
+        seen.add(child.pid);
+        next.push(child.pid);
+      }
+    }
+    if (next.length === 0) break;
+    levels.push(next);
+  }
+  return levels.reverse();
 }
 
 /** All pids descended (any depth) from rootPid, via the parent links. */
@@ -401,4 +443,145 @@ async function readSubagents(opts) {
   return out;
 }
 
-module.exports = { readSubagents };
+// ---------------------------------------------------------------------------
+// Stopping a running sub-agent
+// ---------------------------------------------------------------------------
+const STOP_GRACE_MS = 2500; // POSIX: SIGTERM → wait → SIGKILL the stragglers
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** taskkill the given pids (Windows). /T also sweeps children spawned after our
+ * snapshot; /F because a pi run has no window to close politely. */
+function taskkill(pids) {
+  return new Promise((resolve) => {
+    const args = ["/F", "/T"];
+    for (const pid of pids) args.push("/PID", String(pid));
+    execFile("taskkill.exe", args, { timeout: 10000, windowsHide: true }, (err, stdout, stderr) => {
+      // taskkill exits non-zero when ANY pid was already gone, which is a normal
+      // race here — liveness is re-checked by the caller, so this is only for the
+      // diagnostic string.
+      resolve(err ? String((stderr || stdout || err.message) || "").trim() : "");
+    });
+  });
+}
+
+async function killTree(procs, rootPid) {
+  const levels = killOrder(procs, rootPid);
+  const all = levels.flat();
+  let detail = "";
+  if (process.platform === "win32") {
+    detail = await taskkill(all);
+  } else {
+    for (const level of levels) {
+      for (const pid of level) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+    await sleep(STOP_GRACE_MS);
+    for (const pid of all) {
+      if (!pidAlive(pid)) continue;
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+  return { pids: all, detail };
+}
+
+/**
+ * Terminate one or more running sub-agent sessions.
+ *
+ * @param {{ serverPid?: number, pids: number[] | "all" }} opts
+ * @returns {Promise<{ ok: boolean, stopped: number[],
+ *   skipped: Array<{pid:number, code:"gone"|"foreign"|"failed", reason:string}>, error?: string }>}
+ *   `ok` means every requested pid is now gone — either we killed it ("gone" is
+ *   benign: it exited on its own between the poll and the click). A "foreign" or
+ *   "failed" skip is a real refusal and must reach the user.
+ *
+ * Safety: a pid is killed ONLY if a FRESH process-table snapshot still shows it
+ * as a pi-cli process descended from this app's pi-web server. The dashboard
+ * polls at up to 3s intervals, so a pid taken from the rendered list can already
+ * be dead — and on Windows pids get recycled fast, so acting on a stale one
+ * could kill an unrelated process. If enumeration fails we refuse outright
+ * rather than kill blind.
+ */
+async function stopSubagents(opts) {
+  opts = opts || {};
+  const out = { ok: false, stopped: [], skipped: [], error: undefined };
+
+  let procs = [];
+  try {
+    procs = await listProcesses();
+  } catch (e) {
+    out.error = `进程枚举失败: ${(e && e.message) || e}`;
+    return out;
+  }
+  if (procs.length === 0) {
+    out.error = "进程枚举失败，已放弃终止（不按陈旧 pid 盲杀）";
+    return out;
+  }
+
+  const live = findRunningSubagents(procs, opts.serverPid);
+  const livePids = new Set(live.map((r) => r.pid));
+
+  let requested;
+  if (opts.pids === "all") {
+    requested = live.map((r) => r.pid);
+  } else if (Array.isArray(opts.pids)) {
+    requested = opts.pids.map(Number).filter((n) => Number.isInteger(n) && n > 1);
+  } else {
+    requested = [];
+  }
+  if (requested.length === 0) {
+    out.ok = opts.pids === "all"; // "stop all" with nothing running is a no-op, not a failure
+    if (!out.ok) out.error = "没有可终止的 pid";
+    return out;
+  }
+
+  for (const pid of requested) {
+    if (!livePids.has(pid)) {
+      // Either it finished on its own (benign) or it was never one of ours —
+      // distinguishable by liveness, and only the latter is worth reporting.
+      out.skipped.push(
+        pidAlive(pid)
+          ? { pid, code: "foreign", reason: "不是本应用的子会话进程，已拒绝终止" }
+          : { pid, code: "gone", reason: "已结束" }
+      );
+      continue;
+    }
+    // A nested sub-agent may already have gone down with its parent's subtree.
+    if (!pidAlive(pid)) {
+      out.skipped.push({ pid, code: "gone", reason: "已结束" });
+      continue;
+    }
+    const { detail } = await killTree(procs, pid);
+    if (pidAlive(pid)) {
+      out.skipped.push({
+        pid,
+        code: "failed",
+        reason: detail ? `终止失败: ${detail}` : "终止失败，进程仍在运行",
+      });
+    } else {
+      out.stopped.push(pid);
+    }
+  }
+
+  out.ok = out.skipped.every((s) => s.code === "gone");
+  if (!out.ok && !out.error) {
+    out.error = out.skipped
+      .filter((s) => s.code !== "gone")
+      .map((s) => `pid ${s.pid}: ${s.reason}`)
+      .join("; ");
+  }
+  return out;
+}
+
+module.exports = { readSubagents, stopSubagents };

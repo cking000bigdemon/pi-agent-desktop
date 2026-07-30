@@ -1037,6 +1037,91 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     return row;
   }
 
+  // Two-step destructive button: first click arms it ("确认终止"), second click
+  // within CONFIRM_MS fires. Killing a run loses that step's work and there's no
+  // resume (see features/subagents.js), so a stray click must not be enough — and
+  // an inline arm/disarm beats a modal here because the popover closes on any
+  // outside click anyway.
+  const CONFIRM_MS = 4000;
+  function armedButton(o) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const bs = btn.style;
+    bs.flex = "0 0 auto";
+    bs.cursor = "pointer";
+    bs.border = "1px solid var(--border, rgba(0,0,0,0.06))";
+    bs.borderRadius = "0"; // Metro tiles are square
+    bs.background = "transparent";
+    bs.fontFamily = UI;
+    bs.fontSize = "10.5px";
+    bs.lineHeight = "1.6";
+    bs.padding = o.wide ? "6px 0" : "0 5px";
+    if (o.wide) bs.width = "100%";
+
+    let armed = false;
+    let disarmTimer = null;
+    const paint = () => {
+      btn.textContent = armed ? o.confirmLabel : o.label;
+      btn.style.color = armed ? "#ffffff" : "var(--text-dim, #9ca3af)";
+      btn.style.background = armed ? RED : "transparent";
+      btn.style.borderColor = armed ? RED : "var(--border, rgba(0,0,0,0.06))";
+    };
+    const disarm = () => {
+      armed = false;
+      if (disarmTimer) clearTimeout(disarmTimer);
+      disarmTimer = null;
+      paint();
+    };
+    paint();
+    btn.title = o.title || "";
+    btn.addEventListener("mouseenter", () => {
+      if (!armed && !btn.disabled) btn.style.color = RED;
+    });
+    btn.addEventListener("mouseleave", () => {
+      if (!armed && !btn.disabled) btn.style.color = "var(--text-dim, #9ca3af)";
+    });
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't let the outside-click handler close the popover
+      if (btn.disabled) return;
+      if (!armed) {
+        armed = true;
+        paint();
+        disarmTimer = setTimeout(disarm, CONFIRM_MS);
+        return;
+      }
+      disarm();
+      btn.disabled = true;
+      btn.textContent = o.busyLabel;
+      btn.style.color = "var(--text-dim, #9ca3af)";
+      btn.style.background = "transparent";
+      btn.style.borderColor = "var(--border, rgba(0,0,0,0.06))";
+      btn.style.cursor = "default";
+      o.onConfirm(btn);
+    });
+    return btn;
+  }
+
+  // Fire the stop, then re-read status. On success re-render so the stopped run
+  // drops off the list; on failure keep the current card standing so the reason
+  // stays visible on the button (a re-render would wipe it).
+  function requestSubagentStop(payload, btn, failLabel) {
+    const fail = (why) => {
+      btn.textContent = failLabel;
+      btn.style.color = RED;
+      btn.title = why;
+    };
+    ipcRenderer
+      .invoke("pi-web-desktop:subagent-stop", payload)
+      .then((res) => {
+        const ok = !!(res && res.ok);
+        if (!ok) fail((res && (res.error || (res.skipped || []).map((s) => s.reason).join("; "))) || "未知原因");
+        return refresh().then(() => {
+          if (ok && openCategory === "subagents") renderPopover("subagents");
+        });
+      })
+      .catch((e) => fail(String((e && e.message) || e)));
+  }
+
   // Two sections: live runs (green) + finished-this-session (gray). The running
   // list comes from the OS process table (sees foreground AND background runs);
   // the finished list from run-history.jsonl.
@@ -1058,9 +1143,37 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     } else {
       for (const r of s.runningList) {
         const tag = r.source === "background" ? r.mode || "bg" : "前台";
-        runWrap.appendChild(
-          subagentRow({ name: r.agent || "subagent", tag, title: r.pid ? `pid ${r.pid}` : undefined })
-        );
+        const row = subagentRow({
+          name: r.agent || "subagent",
+          tag,
+          title: r.pid ? `pid ${r.pid}` : undefined,
+        });
+        if (r.pid) {
+          const stop = armedButton({
+            label: "终止",
+            confirmLabel: "确认终止",
+            busyLabel: "终止中…",
+            title: `强制结束 pid ${r.pid} 及其子进程（不可恢复，该步骤会记为失败）`,
+            onConfirm: (btn) => requestSubagentStop({ pid: r.pid }, btn, "终止失败"),
+          });
+          stop.style.marginLeft = "6px";
+          stop.style.alignSelf = "center"; // the row is baseline-aligned for text
+          row.appendChild(stop);
+        }
+        runWrap.appendChild(row);
+      }
+      if (s.runningList.filter((r) => r.pid).length > 1) {
+        const all = armedButton({
+          label: `全部终止（${s.runningList.filter((r) => r.pid).length}）`,
+          confirmLabel: "确认全部终止",
+          busyLabel: "终止中…",
+          wide: true,
+          title: "强制结束当前所有子会话（不可恢复）",
+          onConfirm: (btn) => requestSubagentStop({ all: true }, btn, "终止失败"),
+        });
+        all.style.margin = "8px 0 2px 13px";
+        all.style.width = "calc(100% - 13px)";
+        runWrap.appendChild(all);
       }
     }
     card.appendChild(runWrap);
