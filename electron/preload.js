@@ -1315,3 +1315,68 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 
   whenBodyReady(init);
 })();
+
+// ---------------------------------------------------------------------------
+// Brand rename — "Pi Web" → "Pi Agent" in the embedded page
+// ---------------------------------------------------------------------------
+// The shell ships as "Pi Agent" (productName / window title / installer), but
+// the page it embeds still calls itself "Pi Web" in two visible places:
+//   1. the sidebar wordmark — a <button> that scrambles between "Pi Web" and
+//      the version pair on click (SessionSidebar's version toggle);
+//   2. the empty-state hero next to the ghost π.
+// Both are hard-coded literals in upstream's bundle with no branding config,
+// so the shell renames them here instead of forking pi-web — a text-node
+// rewrite survives pi-web upgrades (no chunk hashes / selectors involved) and
+// degrades to a silent no-op if upstream ever changes the wording.
+//
+// Exact-match only ("Pi Web" as the WHOLE text node): a substring rewrite would
+// also mangle chat content and session titles that legitimately mention Pi Web.
+//
+// document.title is deliberately NOT touched: pi-web re-asserts it from its own
+// MutationObserver on <head>, so rewriting it would ping-pong forever — and the
+// native window/taskbar title is already pinned to "Pi Agent" by main.js
+// (page-title-updated is preventDefault'ed), so nothing user-visible remains.
+(function renameBrand() {
+  // Only the real pi-web page — never the shell's own file:// pages.
+  if (location.protocol !== "http:") return;
+
+  const FROM = "Pi Web";
+  const TO = "Pi Agent";
+  // Never rewrite inside script/style payloads (the RSC flight data inlined in
+  // <script> mentions the name) or inside anything the user is editing.
+  const SKIP = new Set(["SCRIPT", "STYLE", "TEXTAREA", "NOSCRIPT"]);
+
+  function fixText(node) {
+    if (!node || node.nodeType !== Node.TEXT_NODE || node.nodeValue !== FROM) return;
+    const el = node.parentElement;
+    if (!el || SKIP.has(el.tagName) || el.isContentEditable) return;
+    node.nodeValue = TO;
+  }
+
+  function scan(root) {
+    if (!root) return;
+    if (root.nodeType === Node.TEXT_NODE) return fixText(root);
+    if (root.nodeType !== Node.ELEMENT_NODE || SKIP.has(root.tagName)) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) fixText(n);
+  }
+
+  function init() {
+    scan(document.body);
+    // React re-renders both spots (the wordmark on every scramble frame, the
+    // hero whenever the empty state remounts), so the rewrite has to be
+    // standing rather than one-shot. Cost is bounded: each record only walks
+    // the subtree that actually changed, and the match is a string identity
+    // check.
+    new MutationObserver((records) => {
+      for (const r of records) {
+        if (r.type === "characterData") fixText(r.target);
+        else r.addedNodes.forEach(scan);
+      }
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  }
+
+  if (document.body) init();
+  else document.addEventListener("DOMContentLoaded", init, { once: true });
+})();
