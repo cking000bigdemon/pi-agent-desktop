@@ -361,10 +361,53 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
   }
 
   // Reserve BAR_H at the bottom of the page so the fixed bar doesn't overlap
-  // pi-web's own bottom input toolbar. pi-web's app pane is the <body> child
-  // carrying inline `height:100dvh`; we tag it with a data-attr we own and a
-  // stylesheet shrinks it by BAR_H. !important beats React's inline height, and
-  // because we never mutate a React-managed style, re-renders can't undo it.
+  // pi-web's own bottom input toolbar. Two mechanisms, keyed to pi-web version:
+  //
+  //  - pi-web >= 0.8.6 sizes html/body, the app pane and both side panels off
+  //    the `--app-viewport-height` custom property (all use
+  //    `var(--app-viewport-height, 100dvh)`), so shrinking that variable on
+  //    <html> is the official reserve hook (guardViewportReserve below).
+  //  - pi-web < 0.8.6: the app pane is the <body> child carrying inline
+  //    `height:100dvh`; we tag it with a data-attr we own and a stylesheet
+  //    shrinks it by BAR_H. !important beats React's inline height, and
+  //    because we never mutate a React-managed style, re-renders can't undo it.
+  //
+  // Both may be active at once (harmless — they resolve to the same height).
+  function viewportReserveValue() {
+    return "calc(100dvh - " + BAR_H + "px)";
+  }
+
+  // pi-web 0.8.6+ maintains --app-viewport-height itself: a visualViewport
+  // resize/scroll effect (and its mount-time run) sets it to innerHeight px,
+  // overwriting anything the shell wrote. Re-apply ours whenever it changes:
+  // the style-attribute observer below always runs after pi-web's own write,
+  // so on desktop (where innerHeight === 100dvh, no virtual keyboard) the
+  // shell's value wins permanently.
+  function applyViewportReserve() {
+    const root = document.documentElement;
+    if (!root) return;
+    if (root.style.getPropertyValue("--app-viewport-height") !== viewportReserveValue()) {
+      root.style.setProperty("--app-viewport-height", viewportReserveValue());
+    }
+  }
+
+  function guardViewportReserve() {
+    applyViewportReserve();
+    try {
+      new MutationObserver(() => applyViewportReserve()).observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["style"],
+      });
+    } catch {
+      /* ignore */
+    }
+    const vv = window.visualViewport;
+    if (vv) {
+      vv.addEventListener("resize", applyViewportReserve);
+      vv.addEventListener("scroll", applyViewportReserve);
+    }
+  }
+
   function ensureReserveStyle() {
     if (document.getElementById("pi-web-desktop-reserve-style")) return;
     const st = document.createElement("style");
@@ -385,7 +428,10 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
       if (el === host || el.id === "pi-web-desktop-cta-host" || el.id === "pi-web-desktop-dashboard-host") {
         continue;
       }
-      if (el.tagName === "DIV" && el.style && el.style.height === "100dvh") {
+      // 0.8.6 renders the pane with inline `var(--app-viewport-height, 100dvh)`
+      // (whitespace normalized); older versions use the literal `100dvh`.
+      const h = el.tagName === "DIV" && el.style ? el.style.height.replace(/\s+/g, "") : "";
+      if (h === "100dvh" || h === "var(--app-viewport-height,100dvh)") {
         if (!el.hasAttribute("data-piwd-reserve")) el.setAttribute("data-piwd-reserve", "1");
         return true;
       }
@@ -395,7 +441,8 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 
   function setupReserve() {
     ensureReserveStyle();
-    tagAppRoot();
+    guardViewportReserve(); // pi-web >= 0.8.6 (custom-property hook)
+    tagAppRoot(); // pi-web < 0.8.6 (inline height fallback)
     // pi-web renders client-side, so the app pane mounts after DOMContentLoaded
     // (and may remount on route change). Watch for it and (re)tag it.
     try {
