@@ -86,8 +86,8 @@
       "id": "variflight-web-search",
       "file": "variflight-web-search.ts",
       "name": "联网搜索（VariFlight / Perplexity）",
-      "summary": "三个互补的联网搜索工具，按成本分级",
-      "description": "补齐 pi 不原生支持的服务端联网搜索：variflight_web_search（免费，走 VariFlight AI 网关 Responses API 的内置 web_search，返回带来源的结论）、perplexity_search（$0.005/次，返回结构化 ranked results）、perplexity_pro_search（$0.008/次 + token 费，Sonar Pro 多步深度检索）。凭证读 models.json 已配置的 provider 或 PERPLEXITY_API_KEY，不新增密钥。",
+      "summary": "四个互补的联网搜索工具，按成本分级",
+      "description": "补齐 pi 不原生支持的服务端联网搜索：variflight_web_search（免费，走 VariFlight AI 网关 Responses API 的内置 web_search，返回带来源的结论）、perplexity_search（$0.005/次，返回结构化 ranked results）、perplexity_pro_search（$0.008/次 + token 费，Sonar Pro 多步深度检索）、perplexity_async_sonar（真异步 /v1/async/sonar 提交＋轮询，默认 sonar-deep-research，服务端排队执行可跑几分钟到十几分钟，token 费最贵，仅用于长时间深度调研）。凭证读 models.json 已配置的 provider 或 PERPLEXITY_API_KEY，不新增密钥。",
       "default": true,
       "deps": []
     },
