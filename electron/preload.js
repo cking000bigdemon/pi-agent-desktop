@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld("piWebDesktop", {
   // MCP / extension activation status for the bottom dashboard bar (and for
   // anything else that wants it). Reads ~/.pi config in the main process.
   getDashboardStatus: () => ipcRenderer.invoke("pi-web-desktop:dashboard-status"),
+  // Tool registry of the live pi session (see features/tools.js). Separate from
+  // the dashboard status because it is fetched over pi-web's session RPC rather
+  // than read from ~/.pi, and it can legitimately answer "no live session".
+  getToolsStatus: (opts) => ipcRenderer.invoke("pi-web-desktop:tools-status", opts || {}),
 });
 
 // pi-web's OWN desktop bridge (upstream v0.7.13+): the session sidebar probes
@@ -317,8 +321,9 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
   let host = null;
   let bar = null;
   let popover = null;
-  let openCategory = null; // null | "mcp" | "extensions"
+  let openCategory = null; // null | "mcp" | "extensions" | "tools" | "subagents" | "wiki"
   let status = null;
+  let tools = null; // separate feed — see refresh()
   let chips = {}; // category -> { active, inactive } count <span>s
   let subagentPulse = null; // WAAPI handle for the running sub-agent live-tile pulse
 
@@ -480,6 +485,8 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     bar.appendChild(buildChip("mcp", "MCP"));
     bar.appendChild(buildSep());
     bar.appendChild(buildChip("extensions", "Extensions"));
+    bar.appendChild(buildSep());
+    bar.appendChild(buildToolsChip());
     bar.appendChild(buildSep());
     bar.appendChild(buildSubagentChip());
 
@@ -659,6 +666,86 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     return chip;
   }
 
+  // Tools chip: how many tools the LIVE pi session has registered (green =
+  // currently active for the model, gray = registered but switched off by the
+  // session's tool preset). Unlike every other chip its data can be genuinely
+  // absent — the registry only exists inside a running agent process — so with
+  // no live session it renders an em-dash instead of a misleading 0.
+  function buildToolsChip() {
+    const category = "tools";
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.setAttribute("aria-label", "已注册工具");
+    const cs = chip.style;
+    cs.pointerEvents = "auto";
+    cs.display = "flex";
+    cs.alignItems = "center";
+    cs.gap = "6px";
+    cs.cursor = "pointer";
+    cs.border = "none";
+    cs.background = "transparent";
+    cs.color = "var(--text, #1a1a1a)";
+    cs.fontFamily = UI;
+    cs.fontSize = "12px";
+    cs.lineHeight = "1";
+    cs.padding = "5px 8px";
+    cs.borderRadius = "0"; // square Metro chip
+    cs.transition = "background .15s ease";
+    chip.addEventListener(
+      "mouseenter",
+      () => (chip.style.background = "color-mix(in srgb, var(--text, #1a1a1a) 8%, transparent)")
+    );
+    chip.addEventListener("mouseleave", () => {
+      if (openCategory !== category) chip.style.background = "transparent";
+    });
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePopover(category);
+    });
+
+    const name = document.createElement("span");
+    name.textContent = "Tools";
+    name.style.color = "var(--text-muted, #6b7280)";
+    name.style.marginRight = "2px";
+
+    // The two counts live in one wrapper so the whole pair can be swapped for a
+    // single em-dash when there is nothing to report.
+    const nums = document.createElement("span");
+    nums.style.display = "flex";
+    nums.style.alignItems = "center";
+    nums.style.gap = "6px";
+
+    const active = document.createElement("span");
+    active.textContent = "–";
+    active.style.color = GREEN;
+    active.style.fontWeight = "600";
+    active.style.fontVariantNumeric = "tabular-nums";
+
+    const idle = document.createElement("span");
+    idle.textContent = "–";
+    idle.style.color = GRAY;
+    idle.style.fontWeight = "600";
+    idle.style.fontVariantNumeric = "tabular-nums";
+
+    nums.appendChild(dot(GREEN));
+    nums.appendChild(active);
+    nums.appendChild(dot(GRAY));
+    nums.appendChild(idle);
+
+    const dash = document.createElement("span");
+    dash.textContent = "—";
+    dash.style.color = "var(--text-dim, #9ca3af)";
+    dash.style.fontWeight = "600";
+    dash.style.display = "none";
+
+    chip.appendChild(name);
+    chip.appendChild(nums);
+    chip.appendChild(dash);
+
+    chips[category] = { el: chip, nums, active, idle, dash };
+    return chip;
+  }
+
   // Wiki chip: concept count of the ACTIVE workspace's OKF knowledge base.
   // Clicking opens a popover (domain breakdown + "打开知识图谱" action). Left-
   // aligned via marginRight:auto so it sits opposite the right-hand chip group.
@@ -777,6 +864,26 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
           `本次启动已完成 ${done} 个${failed ? `，失败 ${failed} 个` : ""}`
         : "子会话（sub-agent）运行状态";
     }
+    if (chips.tools) {
+      const t = tools;
+      const c = chips.tools;
+      if (t && t.available) {
+        const total = t.total || 0;
+        const on = t.active || 0;
+        c.nums.style.display = "flex";
+        c.dash.style.display = "none";
+        c.active.textContent = String(on);
+        c.idle.textContent = String(Math.max(0, total - on));
+        c.el.title =
+          `已注册 ${total} 个工具，其中 ${on} 个对模型可用\n` +
+          (t.groups || []).map((g) => `${g.label} ${g.tools.length}`).join(" · ") +
+          `\n来自会话 ${String(t.sessionId || "").slice(0, 8)}${t.cwd ? " · " + t.cwd : ""}`;
+      } else {
+        c.nums.style.display = "none";
+        c.dash.style.display = "inline";
+        c.el.title = "已注册工具：" + toolsReasonText(t);
+      }
+    }
     if (chips.wiki) {
       const w = (status && status.wiki) || null;
       const present = !!(w && w.present);
@@ -787,6 +894,18 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
           `工作区 ${w.cwd || ""}`
         : "当前工作区无 OKF 知识库（在 pi 里 /wiki-init + /wiki-compile 生成）";
     }
+  }
+
+  // Why the Tools chip has nothing to show. Shared by the chip tooltip and the
+  // popover body so the two never drift apart.
+  function toolsReasonText(t) {
+    const reason = (t && t.reason) || "no-server";
+    if (reason === "no-live-session") {
+      return "当前没有运行中的会话。工具清单只存在于运行中的 pi 进程里——打开或新建一个会话后即可看到。";
+    }
+    if (reason === "no-sessions") return "还没有任何会话记录。";
+    if (reason === "error") return "读取失败：" + ((t && t.error) || "未知错误");
+    return "内嵌服务还没就绪。";
   }
 
   // --- the bottom-right popover ---
@@ -800,22 +919,25 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 
   function openPopover(category) {
     openCategory = category;
-    for (const cat of ["mcp", "extensions", "subagents", "wiki"]) {
+    for (const cat of ["mcp", "extensions", "tools", "subagents", "wiki"]) {
       if (chips[cat]) {
         chips[cat].el.style.background =
           cat === category ? "color-mix(in srgb, var(--text, #1a1a1a) 8%, transparent)" : "transparent";
       }
     }
     renderPopover(category);
-    // Refresh in the background so the list reflects any config edits.
-    refresh().then(() => {
+    // Refresh in the background so the list reflects any config edits. Opening
+    // the tool list bypasses its TTL cache — that one is an explicit user ask.
+    const pending =
+      category === "tools" ? refreshTools(true).then(updateChips) : refresh();
+    pending.then(() => {
       if (openCategory === category) renderPopover(category);
     });
   }
 
   function closePopover() {
     openCategory = null;
-    for (const cat of ["mcp", "extensions", "subagents", "wiki"]) {
+    for (const cat of ["mcp", "extensions", "tools", "subagents", "wiki"]) {
       if (chips[cat]) chips[cat].el.style.background = "transparent";
     }
     if (popover) {
@@ -867,7 +989,9 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
           ? "Sub-agents"
           : category === "wiki"
             ? "知识库（OKF）"
-            : "Extensions";
+            : category === "tools"
+              ? "工具（Tools）"
+              : "Extensions";
 
     // header
     const head = document.createElement("div");
@@ -913,6 +1037,8 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
       appendSubagentSections(card);
     } else if (category === "wiki") {
       appendWikiSection(card);
+    } else if (category === "tools") {
+      appendToolsSection(card);
     } else {
       card.appendChild(buildSection("已激活", GREEN, data.active, category));
       card.appendChild(buildSection("暂未激活", RED, data.inactive, category));
@@ -1313,13 +1439,136 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
     card.appendChild(act);
   }
 
+  // --- tools popover body ---
+  // Which oversized groups the user expanded. Kept outside renderPopover so a
+  // background refresh (which rebuilds the card) doesn't collapse them again.
+  const expandedGroups = new Set();
+  const GROUP_COLLAPSE_AT = 10;
+
+  function toolRow(t) {
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "8px";
+    row.style.padding = "3px 0 3px 13px";
+
+    const d = dot(t.active ? GREEN : GRAY, 6);
+    if (!t.active) d.style.opacity = "0.5";
+    row.appendChild(d);
+
+    const name = document.createElement("span");
+    name.textContent = t.name;
+    name.style.fontSize = "12.5px";
+    name.style.wordBreak = "break-all";
+    name.style.color = t.active ? "var(--text, #1a1a1a)" : "var(--text-dim, #9ca3af)";
+    row.appendChild(name);
+
+    if (t.description) row.title = t.description;
+    return row;
+  }
+
+  function appendToolsSection(card) {
+    const t = tools;
+
+    if (!t || !t.available) {
+      const empty = document.createElement("div");
+      empty.style.color = "var(--text-dim, #9ca3af)";
+      empty.style.fontSize = "12.5px";
+      empty.style.lineHeight = "1.6";
+      empty.style.padding = "2px 0 4px";
+      empty.textContent = toolsReasonText(t);
+      card.appendChild(empty);
+      return;
+    }
+
+    const sum = document.createElement("div");
+    sum.style.marginBottom = "4px";
+    sum.style.fontSize = "12.5px";
+    sum.style.color = "var(--text-muted, #6b7280)";
+    sum.textContent = `已注册 ${t.total} 个 · 对模型可用 ${t.active} 个`;
+    card.appendChild(sum);
+
+    const src = document.createElement("div");
+    src.style.marginBottom = "10px";
+    src.style.fontSize = "11px";
+    src.style.color = "var(--text-dim, #9ca3af)";
+    src.style.wordBreak = "break-all";
+    src.textContent = `会话 ${String(t.sessionId || "").slice(0, 8)}${t.cwd ? " · " + t.cwd : ""}`;
+    card.appendChild(src);
+
+    for (const g of t.groups || []) {
+      const wrap = document.createElement("div");
+      wrap.style.marginBottom = "12px";
+      wrap.appendChild(sectionHeading(g.label, "var(--accent, #0050EF)", g.tools.length));
+
+      const collapsed = g.tools.length > GROUP_COLLAPSE_AT && !expandedGroups.has(g.key);
+      const shown = collapsed ? g.tools.slice(0, GROUP_COLLAPSE_AT) : g.tools;
+      for (const tool of shown) wrap.appendChild(toolRow(tool));
+
+      if (collapsed) {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.textContent = `显示其余 ${g.tools.length - GROUP_COLLAPSE_AT} 个`;
+        const ms = more.style;
+        ms.marginLeft = "13px";
+        ms.marginTop = "2px";
+        ms.cursor = "pointer";
+        ms.border = "none";
+        ms.borderRadius = "0";
+        ms.background = "transparent";
+        ms.padding = "2px 0";
+        ms.color = "var(--accent, #0050EF)";
+        ms.fontFamily = UI;
+        ms.fontSize = "11.5px";
+        more.addEventListener("click", (e) => {
+          e.stopPropagation();
+          expandedGroups.add(g.key);
+          if (openCategory === "tools") renderPopover("tools");
+        });
+        wrap.appendChild(more);
+      }
+
+      card.appendChild(wrap);
+    }
+
+    const legend = document.createElement("div");
+    legend.style.fontSize = "11px";
+    legend.style.color = "var(--text-dim, #9ca3af)";
+    legend.style.lineHeight = "1.6";
+    legend.textContent = "绿点 = 当前会话对模型开放；灰点 = 已注册但被工具预设关掉。";
+    card.appendChild(legend);
+  }
+
   // --- data + lifecycle ---
-  async function refresh() {
+  async function refreshStatus() {
     try {
       status = await ipcRenderer.invoke("pi-web-desktop:dashboard-status");
     } catch {
       status = { mcp: { active: [], inactive: [] }, extensions: { active: [], inactive: [] } };
     }
+    return status;
+  }
+
+  async function refreshTools(force) {
+    try {
+      tools = await ipcRenderer.invoke("pi-web-desktop:tools-status", { force: !!force });
+    } catch (e) {
+      tools = {
+        available: false,
+        reason: "error",
+        total: 0,
+        active: 0,
+        groups: [],
+        error: String((e && e.message) || e),
+      };
+    }
+    return tools;
+  }
+
+  // The two feeds are independent (disk config vs. live session RPC) — run them
+  // side by side so a slow tool fetch never delays the other chips.
+  async function refresh() {
+    await Promise.all([refreshStatus(), refreshTools(false)]);
     updateChips();
     return status;
   }

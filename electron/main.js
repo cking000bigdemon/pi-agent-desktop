@@ -35,6 +35,7 @@ const updater = require("./updater");
 const runtimeGuard = require("./runtime-guard");
 const dashboard = require("./features/dashboard");
 const subagents = require("./features/subagents");
+const toolsFeature = require("./features/tools");
 const directoryPicker = require("./features/directory-picker");
 const extensionsManager = require("./features/extensions-manager");
 
@@ -916,6 +917,33 @@ ipcMain.handle("pi-web-desktop:dashboard-status", async () => {
       extensions: { active: [], inactive: [] },
       tokens: { total: 0, input: 0, output: 0, calls: 0, sessions: 0 },
       subagents: { running: 0, runningList: [], doneSession: 0, failedSession: 0, recent: [] },
+      error: String((e && e.message) || e),
+    };
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Tools (the live session's tool registry)
+// ---------------------------------------------------------------------------
+// Backend for the Tools chip. Unlike the MCP/extension counts this cannot be
+// read off disk — the registry only exists inside a running agent process — so
+// features/tools.js asks the embedded pi-web over its session RPC, and only when
+// a session's RPC process is already alive (never spawning one just to count).
+// See the header of features/tools.js for why the answer is session-scoped.
+ipcMain.handle("pi-web-desktop:tools-status", async (_event, payload) => {
+  try {
+    return await toolsFeature.readTools({
+      serverUrl,
+      force: !!(payload && payload.force),
+    });
+  } catch (e) {
+    dbg(`tools-status error ${(e && e.message) || e}`);
+    return {
+      available: false,
+      reason: "error",
+      total: 0,
+      active: 0,
+      groups: [],
       error: String((e && e.message) || e),
     };
   }
