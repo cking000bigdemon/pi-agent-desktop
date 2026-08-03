@@ -9,7 +9,7 @@
  * 判定标准（关键）：不是"是否含英文"，而是"中文汉字是否占主导"。
  *   - 统计正文里的"实义字符"：汉字 + 各种字母类文字（拉丁、假名、谚文、
  *     西里尔、希腊、阿拉伯、希伯来、泰文、天城文……），排除标点/数字/空白/emoji。
- *   - 若 汉字数 / 实义字符总数 < 阈值(默认 0.5)，判为语言漂移。
+ *   - 若 汉字数 / 实义字符总数 < 阈值(默认 0.1)，判为语言漂移。
  *   - 这样任何非中文语言主导都会被拦截，而"中文夹少量英文术语"不会误伤。
  *
  * 工作原理：
@@ -41,8 +41,11 @@
  * 环境变量：
  *   LANG_GUARD_ENABLED        默认 true。设 0/false 关闭。
  *   LANG_GUARD_MIN_CHARS      触发判定所需的最小实义字符数。默认 30。
- *   LANG_GUARD_MIN_HAN_RATIO  中文汉字占实义字符的最小比例。默认 0.5，
+ *   LANG_GUARD_MIN_HAN_RATIO  中文汉字占实义字符的最小比例。默认 0.1，
  *                             低于此值判为漂移。取值 0~1。
+ *   LANG_GUARD_MAX_KANA_RATIO 日文假名占实义字符的最大比例。默认 0.15，高于此值直接
+ *                             判日语漂移（不看汉字比例）。日文汉字与中文汉字共区间，
+ *                             单靠汉字占比挡不住日语，故用假名占比兜底。取值 0~1。
  *   LANG_GUARD_EARLY_ABORT    默认 false。设 1/true 允许在流式中提前判定并中断
  *                             （不必等 message_end）。仅当正文很长时才提前判。
  *   LANG_GUARD_EARLY_MIN_CHARS 提前判定所需的最小实义字符数。默认 200。
@@ -63,7 +66,8 @@ const STATE_TYPE = "language-guard-state";
 const RESTART_MARKER = "\u200b[language-guard-restart]\u200b"; // 零宽标记
 
 const DEFAULT_MIN_MEANINGFUL_CHARS = 30;
-const DEFAULT_MIN_HAN_RATIO = 0.5;
+const DEFAULT_MIN_HAN_RATIO = 0.1;
+const DEFAULT_MAX_KANA_RATIO = 0.15; // 假名占实义字符超此值直接判日语漂移
 const DEFAULT_MAX_RESTARTS = 2;
 const DEFAULT_SUBPI_TIMEOUT_MS = 30_000;
 const DEFAULT_EARLY_MIN_CHARS = 200; // 流式提前判定需的最小实义字符数（开启 LANG_GUARD_EARLY_ABORT 时）
@@ -108,7 +112,13 @@ function stripNonProse(text: string): string {
 }
 
 // 中文汉字（含扩展区、兼容区）。不含日文假名 / 韩文谚文。
+// 注意：日文汉字与中文汉字共用同一 Unicode 区间，靠汉字比例无法区分中/日，
+// 因此日语（大量用汉字）会骗过“汉字占比”判定 —— 需下面的假名占比规则兜底。
 const HAN_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/gu;
+
+// 日文假名（平假名 + 片假名，含片假名语音扩展）。假名是中文里不会出现的字符，
+// 只要占比可观即可判定为日语漂移，无需理会同段落里夹了多少汉字。
+const KANA_RE = /[\u3040-\u309f\u30a0-\u30ff\u31f0-\u31ff]/gu;
 
 // "实义字符"：汉字 + 所有字母类文字。用于分母。排除标点/数字/空白/符号/emoji。
 // 覆盖：拉丁、假名、谚文、西里尔、希腊、阿拉伯、希伯来、泰文、天城文、
@@ -143,6 +153,11 @@ function judgeLanguage(rawText: string, minChars: number, minHanRatio: number): 
 	const prose = stripNonProse(rawText);
 	const meaningful = countMatches(prose, MEANINGFUL_RE);
 	if (meaningful < minChars) return "too-short";
+	// 日语兜底：假名占比过高直接判 drift（不看汉字比例）。日文汉字与中文汉字
+	// 共区间，靠汉字占比挡不住日语；但假名是中文正文里不会出现的，占比可观即漂移。
+	const maxKanaRatio = getFloatEnv("LANG_GUARD_MAX_KANA_RATIO", DEFAULT_MAX_KANA_RATIO);
+	const kana = countMatches(prose, KANA_RE);
+	if (kana / meaningful > maxKanaRatio) return "drift";
 	const han = countMatches(prose, HAN_RE);
 	const ratio = han / meaningful;
 	return ratio < minHanRatio ? "drift" : "ok";

@@ -99,6 +99,24 @@
       "description": "会话开始后拿用户的第一条提问起一个简短标题（子 pi 进程生成，失败时回退到截断首句），省去手动命名。",
       "default": true,
       "deps": []
+    },
+    {
+      "id": "image-generation",
+      "file": "image-generation.ts",
+      "name": "生图工具",
+      "summary": "两个生图工具，把文本描述生成图片并存到 workspace",
+      "description": "补齐 pi 不原生支持的图片输出：generate_image_gpt（OpenAI gpt-image-2，走 /v1/images/generations）与 generate_image_gemini（gemini-3.1-flash-image，走 /v1/chat/completions 取 message.images）。生成的图片保存到当前 workspace 的 ai-output/temporary/pictures/，返回保存路径而非把 base64 塞回上下文。凭证读 models.json 已配置的 provider（默认 cliproxy-dmit），不新增密钥。可用 IMAGE_GEN_* 环境变量覆盖 provider／模型／输出目录／超时。",
+      "default": true,
+      "deps": []
+    },
+    {
+      "id": "vision-fallback",
+      "file": "vision-fallback.ts",
+      "name": "多模态图片输入回退",
+      "summary": "当前模型不支持读图时，本轮自动切到多模态模型，结束后切回",
+      "description": "用户输入附带图片、而当前模型 input 不含 image 时，监听 input 事件自动从候选列表（或全量模型）选一个支持图片的模型 setModel 切过去；本轮 agent 完全结束（agent_settled）后自动恢复原模型与思考级别。候选模型可用 VISION_MODEL_PREFERENCE 环境变量覆盖；/vision-model 命令查看当前模型与图片支持状态。",
+      "default": true,
+      "deps": []
     }
   ]
 }

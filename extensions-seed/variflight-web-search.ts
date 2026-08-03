@@ -1,11 +1,11 @@
 /**
  * Web Search for pi —— 通用联网搜索插件
  *
- * 本扩展注册三个互补的联网搜索工具，agent 应根据实际任务需要和成本选择：
+ * 本扩展注册四个互补的联网搜索工具，agent 应根据实际任务需要和成本选择：
  *
  *  1) `variflight_web_search`  —— 默认首选、**免费**。走 VariFlight AI 网关的
- *     **Responses API**（/v1/responses）携带内置 web_search 工具，返回“带来源的
- *     prose 答案”。适合要一句话结论 / 已综合好的回答，也是日常默认的搜索入口。
+ *     **Responses API**（/v1/responses，stream=true 流式接收）携带内置 web_search 工具，
+ *     返回“带来源的 prose 答案”。适合要一句话结论 / 已综合好的回答，也是日常默认入口。
  *
  *  2) `perplexity_search`      —— **收费 $0.005/次**（仅按请求次数，无 token 费）。
  *     直连 Perplexity **Search API**（https://api.perplexity.ai/search，POST），
@@ -17,25 +17,50 @@
  *     模型自动多步检索 + 抓取页面内容后生成“带引用的深度 prose 答案”。
  *     仅在需要多步推理、复杂跨源综合时才用；简单查询不要用它（贵且慢）。
  *
+ *  4) `perplexity_async_sonar` —— **收费、真异步、最重**。走 Perplexity 官方异步接口
+ *     POST /v1/async/sonar 提交任务、GET /v1/async/sonar/{id} 轮询取结果。默认模型
+ *     `sonar-deep-research`（深度研究，token 费明显更贵；该异步接口仅接受此模型）。
+ *     适合要跨大量来源、可能跑几分钟到十几分钟的长任务；服务端排队执行，客户端只
+ *     轮询，不怕断连。日常搜索用 1)，多步推理用 3)，仅真正需要深度调研才用本工具。
+ *
  * pi 引擎不原生支持服务端 web_search（provider 切 openai-responses 也只是聊天，
  * 不会自动注入 tools:[{web_search}]），所以这里用自定义工具补齐能力。
  *
  * === 凭证来源 ===
  * variflight_web_search：读 ~/.pi/agent/models.json 里**已配置的 provider**
  *   （默认 `variflight`）的 apiKey + baseURL —— 不新增密钥、不硬编码。
- * perplexity_search / perplexity_pro_search：优先读环境变量 PERPLEXITY_API_KEY；
+ * perplexity_search / perplexity_pro_search / perplexity_async_sonar：优先读环境变量 PERPLEXITY_API_KEY；
  *   若无，则回退读 models.json 里名为 `perplexity` 的 provider 的 apiKey。
  * apiKey 三态：字面量 / `!shell命令`(取 stdout) / 环境变量名（与 pi 自身一致）。
  *
  * === 可选环境变量 ===
- *   VF_WEB_SEARCH_PROVIDER  models.json 里用作凭证来源的 provider 名，默认 "variflight"
- *   VF_WEB_SEARCH_MODEL     variflight_web_search 调用的模型，默认 "azure/gpt-5.5"
- *   VF_WEB_SEARCH_TIMEOUT   单次搜索超时(ms)，默认 90000（三个工具共用）
- *   PERPLEXITY_API_KEY      Perplexity 密钥（search 与 pro search 共用，首选来源）
- *   PERPLEXITY_PROVIDER     models.json 里 Perplexity 凭证兜底的 provider 名，默认 "perplexity"
- *   PERPLEXITY_BASE_URL     Perplexity API base，默认 "https://api.perplexity.ai"
- *   PERPLEXITY_PRO_MODEL    pro search 用的 Sonar 模型，默认 "sonar-pro"
- *   PERPLEXITY_PRO_TIMEOUT  pro search 单次超时(ms)，默认 180000（多步推理较慢）
+ *   VF_WEB_SEARCH_PROVIDER      models.json 里用作凭证来源的 provider 名，默认 "variflight"
+ *   VF_WEB_SEARCH_MODEL         variflight_web_search 调用的模型，默认 "azure/gpt-5.5"
+ *   VF_WEB_SEARCH_TIMEOUT       variflight_web_search 流式搜索【总时长上限】(ms)，默认 600000（10 分钟）
+ *   VF_WEB_SEARCH_IDLE_TIMEOUT  variflight_web_search 流式【空闲超时】(ms)，默认 90000：
+ *                               超过该时长未收到任何 SSE 事件才判定卡死。只要服务端持续
+ *                               推事件（web_search 各阶段/文本增量），就不会被掐断。
+ *   PERPLEXITY_API_KEY          Perplexity 密钥（search / pro search / async sonar 共用，首选来源）
+ *   PERPLEXITY_PROVIDER         models.json 里 Perplexity 凭证兜底的 provider 名，默认 "perplexity"
+ *   PERPLEXITY_BASE_URL         Perplexity API base，默认 "https://api.perplexity.ai"
+ *   PERPLEXITY_SEARCH_TIMEOUT   perplexity_search 单次超时(ms)，默认 90000
+ *   PERPLEXITY_PRO_MODEL        pro search 用的 Sonar 模型，默认 "sonar-pro"
+ *   PERPLEXITY_PRO_TIMEOUT      pro search 流式【总时长上限】(ms)，默认 600000（10 分钟）
+ *   PERPLEXITY_PRO_IDLE_TIMEOUT pro search 流式【空闲超时】(ms)，默认 180000（多步推理较慢）
+ *   PERPLEXITY_ASYNC_MODEL      async sonar 模型，默认 "sonar-deep-research"（该接口仅此模型）
+ *   PERPLEXITY_ASYNC_MAX_WAIT   async 轮询【总时长上限】(ms)，默认 900000（15 分钟）
+ *   PERPLEXITY_ASYNC_POLL_INTERVAL async 轮询间隔(ms)，默认 5000
+ *
+ * === 2026-07-27 改造说明 ===
+ * variflight_web_search 由「一次性 POST + 90s 硬超时」改为「stream=true 流式 SSE 接收 +
+ * 空闲/总时长双计时器」。原因：网关侧 web_search + 综合常超过 90s（实测 114s），旧的
+ * 单次硬超时必然掐断；流式下服务端持续推事件，只需对“无数据”设限。注意：网关的
+ * Responses background 模式（POST 返回 queued 后 GET /v1/responses/{id} 轮询）已实测
+ * 不可用——GET 被网关鉴权拦截（401），故未采用。
+ * 同日 perplexity_pro_search 也从单一 180s 硬超时改为同款空闲/总时长双计时器；
+ * 并新增第四个工具 perplexity_async_sonar（走 Perplexity 官方 async 接口，已实测联通）。
+ * 异步接口硬编码用 /v1/async/sonar（与同步 /chat/completions 旧根不同），且实测仅接受
+ * sonar-deep-research 模型（传 sonar 会被 400 invalid_model 拒）。
  *
  * 无外部依赖（只用 node 内置 + 全局 fetch），不需要 npm install。
  */
@@ -48,15 +73,25 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const PROVIDER = process.env.VF_WEB_SEARCH_PROVIDER || "variflight";
 const MODEL = process.env.VF_WEB_SEARCH_MODEL || "azure/gpt-5.5";
-const TIMEOUT_MS = Number(process.env.VF_WEB_SEARCH_TIMEOUT) > 0 ? Number(process.env.VF_WEB_SEARCH_TIMEOUT) : 90_000;
-// Pro Search 多步推理较慢，单独给更长超时（默认 180s）
-const PRO_TIMEOUT_MS = Number(process.env.PERPLEXITY_PRO_TIMEOUT) > 0 ? Number(process.env.PERPLEXITY_PRO_TIMEOUT) : 180_000;
+// variflight_web_search（流式）：总时长上限 + 空闲超时（详见头部注释）
+const TOTAL_TIMEOUT_MS = Number(process.env.VF_WEB_SEARCH_TIMEOUT) > 0 ? Number(process.env.VF_WEB_SEARCH_TIMEOUT) : 600_000;
+const IDLE_TIMEOUT_MS = Number(process.env.VF_WEB_SEARCH_IDLE_TIMEOUT) > 0 ? Number(process.env.VF_WEB_SEARCH_IDLE_TIMEOUT) : 90_000;
+// perplexity_search 单次超时（默认 90s，结构化搜索本身很快）
+const PPLX_SEARCH_TIMEOUT_MS = Number(process.env.PERPLEXITY_SEARCH_TIMEOUT) > 0 ? Number(process.env.PERPLEXITY_SEARCH_TIMEOUT) : 90_000;
+// Pro Search（流式）：同样用「总时长上限 + 空闲超时」双计时器，只要服务端持续推事件就不掐断
+const PRO_TIMEOUT_MS = Number(process.env.PERPLEXITY_PRO_TIMEOUT) > 0 ? Number(process.env.PERPLEXITY_PRO_TIMEOUT) : 600_000;
+const PRO_IDLE_TIMEOUT_MS = Number(process.env.PERPLEXITY_PRO_IDLE_TIMEOUT) > 0 ? Number(process.env.PERPLEXITY_PRO_IDLE_TIMEOUT) : 180_000;
 
 // Perplexity Search API 相关
 const PPLX_PROVIDER = process.env.PERPLEXITY_PROVIDER || "perplexity";
 const PPLX_BASE_URL = (process.env.PERPLEXITY_BASE_URL || "https://api.perplexity.ai").replace(/\/+$/, "");
 // Perplexity Pro Search（Sonar Pro 聊天补全）相关
 const PPLX_PRO_MODEL = process.env.PERPLEXITY_PRO_MODEL || "sonar-pro";
+// Perplexity 异步 Sonar（/v1/async/sonar）相关
+const PPLX_ASYNC_MODEL = process.env.PERPLEXITY_ASYNC_MODEL || "sonar-deep-research";
+// 异步轮询：总时长上限（默认 15 分钟）与轮询间隔（默认 5s）
+const PPLX_ASYNC_MAX_WAIT_MS = Number(process.env.PERPLEXITY_ASYNC_MAX_WAIT) > 0 ? Number(process.env.PERPLEXITY_ASYNC_MAX_WAIT) : 900_000;
+const PPLX_ASYNC_POLL_INTERVAL_MS = Number(process.env.PERPLEXITY_ASYNC_POLL_INTERVAL) > 0 ? Number(process.env.PERPLEXITY_ASYNC_POLL_INTERVAL) : 5_000;
 
 function modelsConfigPath(): string {
   return path.join(os.homedir(), ".pi", "agent", "models.json");
@@ -104,26 +139,92 @@ function extractText(data: any): string {
   return parts.join("\n").trim();
 }
 
+// 流式搜索：POST /v1/responses (stream=true)，SSE 事件驱动。
+// 双计时器：收到任何数据块就重置空闲计时；总时长为硬上限。解决旧版一次性请求
+// 90s 硬超时下，网关长搜索（>90s）必然失败的问题。
 async function doSearch(query: string, creds: Creds, signal?: AbortSignal): Promise<string> {
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+
+  let abortCause: "idle" | "total" | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const resetIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { abortCause = "idle"; ctrl.abort(); }, IDLE_TIMEOUT_MS);
+  };
+  const totalTimer = setTimeout(() => { abortCause = "total"; ctrl.abort(); }, TOTAL_TIMEOUT_MS);
+  resetIdle();
+
   try {
     const res = await fetch(`${creds.baseURL}/v1/responses`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${creds.apiKey}` },
-      body: JSON.stringify({ model: MODEL, tools: [{ type: "web_search" }], input: `联网搜索。${query}` }),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${creds.apiKey}`,
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({ model: MODEL, tools: [{ type: "web_search" }], input: `联网搜索。${query}`, stream: true }),
       signal: ctrl.signal,
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(`VariFlight 网关 HTTP ${res.status}: ${body.slice(0, 500)}`);
     }
-    const data = await res.json();
-    return extractText(data) || "(无搜索结果)";
+    // 网关若忽略 stream 参数返回普通 JSON，按旧逻辑解析（优雅降级）
+    const ctype = res.headers.get("content-type") || "";
+    if (!ctype.includes("text/event-stream")) {
+      const data = await res.json();
+      return extractText(data) || "(无搜索结果)";
+    }
+    if (!res.body) throw new Error("流式响应无 body");
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let answer = "";              // output_text.delta 累计（兜底）
+    let finalResponse: any = null; // response.completed 携带的完整响应（优先用它抽取）
+    let failed: string | null = null;
+
+    const handleEvent = (jsonStr: string) => {
+      if (!jsonStr || jsonStr === "[DONE]") return;
+      let evt: any;
+      try { evt = JSON.parse(jsonStr); } catch { return; }
+      const type = evt?.type;
+      if (type === "response.output_text.delta" && typeof evt.delta === "string") answer += evt.delta;
+      else if (type === "response.completed") finalResponse = evt.response ?? null;
+      else if (type === "response.failed") failed = evt?.response?.error?.message || "服务端处理失败";
+      else if (type === "response.incomplete") failed = `响应不完整: ${evt?.response?.incomplete_details?.reason || "unknown"}`;
+    };
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      resetIdle(); // 收到数据块 = 服务端存活，重置空闲计时
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const t = line.trim();
+        if (t.startsWith("data:")) handleEvent(t.slice(5).trim());
+      }
+    }
+    if (buffer.trim().startsWith("data:")) handleEvent(buffer.trim().slice(5).trim());
+
+    if (failed) throw new Error(failed);
+    if (finalResponse) return extractText(finalResponse) || answer.trim() || "(无搜索结果)";
+    return answer.trim() || "(无搜索结果)";
+  } catch (e) {
+    if ((e as any)?.name === "AbortError" && abortCause) {
+      if (abortCause === "idle") {
+        throw new Error(`搜索超时：${Math.round(IDLE_TIMEOUT_MS / 1000)} 秒内网关未推送任何数据（空闲超时），可调大 VF_WEB_SEARCH_IDLE_TIMEOUT`);
+      }
+      throw new Error(`搜索超时：总时长超过 ${Math.round(TOTAL_TIMEOUT_MS / 1000)} 秒上限，可调大 VF_WEB_SEARCH_TIMEOUT`);
+    }
+    throw e;
   } finally {
-    clearTimeout(timer);
+    if (idleTimer) clearTimeout(idleTimer);
+    clearTimeout(totalTimer);
     if (signal) signal.removeEventListener("abort", onAbort);
   }
 }
@@ -242,7 +343,7 @@ async function perplexitySearch(
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), PPLX_SEARCH_TIMEOUT_MS);
   try {
     const res = await fetch(`${PPLX_BASE_URL}/search`, {
       method: "POST",
@@ -294,7 +395,8 @@ function buildProBody(params: PplxProParams): Record<string, unknown> {
 }
 
 // 解析 SSE 流：拼接 delta.content，并从最后的 chunk 里取 search_results / citations。
-async function readSonarStream(res: Response): Promise<string> {
+// onChunk：每收到一个数据块回调一次（用于重置空闲计时器）。
+async function readSonarStream(res: Response, onChunk?: () => void): Promise<string> {
   if (!res.body) throw new Error("Sonar 流式响应无 body");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -318,6 +420,7 @@ async function readSonarStream(res: Response): Promise<string> {
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    if (onChunk) onChunk();
     buffer += decoder.decode(value, { stream: true });
     // SSE 以空行分隔事件；逐行取 "data:" 载荷
     const lines = buffer.split(/\r?\n/);
@@ -347,7 +450,17 @@ async function perplexityProSearch(
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
-  const timer = setTimeout(() => ctrl.abort(), PRO_TIMEOUT_MS);
+
+  // 与 variflight_web_search 同款双计时器：空闲超时（每收一个数据块重置）+ 总时长硬上限
+  let abortCause: "idle" | "total" | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const resetIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { abortCause = "idle"; ctrl.abort(); }, PRO_IDLE_TIMEOUT_MS);
+  };
+  const totalTimer = setTimeout(() => { abortCause = "total"; ctrl.abort(); }, PRO_TIMEOUT_MS);
+  resetIdle();
+
   try {
     const res = await fetch(`${PPLX_BASE_URL}/chat/completions`, {
       method: "POST",
@@ -363,10 +476,131 @@ async function perplexityProSearch(
       const errText = await res.text().catch(() => "");
       throw new Error(`Perplexity Pro HTTP ${res.status}: ${errText.slice(0, 500)}`);
     }
-    return await readSonarStream(res);
+    return await readSonarStream(res, resetIdle);
+  } catch (e) {
+    if ((e as any)?.name === "AbortError" && abortCause) {
+      if (abortCause === "idle") {
+        throw new Error(`Pro 搜索超时：${Math.round(PRO_IDLE_TIMEOUT_MS / 1000)} 秒内未推送任何数据（空闲超时），可调大 PERPLEXITY_PRO_IDLE_TIMEOUT`);
+      }
+      throw new Error(`Pro 搜索超时：总时长超过 ${Math.round(PRO_TIMEOUT_MS / 1000)} 秒上限，可调大 PERPLEXITY_PRO_TIMEOUT`);
+    }
+    throw e;
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer);
+    clearTimeout(totalTimer);
+    if (signal) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+// ============================================================================
+// Perplexity 异步 Sonar（POST /v1/async/sonar 提交 + GET /v1/async/sonar/{id} 轮询）
+// 请求体用顶层 request 包裹；响应顶层含 id/status/response，status 取值
+// CREATED / IN_PROGRESS / COMPLETED / FAILED；完成后结果在 response（chat completion 对象）。
+// ============================================================================
+
+type PplxAsyncParams = {
+  query: string;
+  model?: string;
+  search_mode?: "web" | "academic" | "sec";
+  search_domain_filter?: string[];
+};
+
+// 异步接口硬编码用 /v1/async/sonar；若 PPLX_BASE_URL 已含 /v1 则不重复拼接。
+function asyncSonarBase(): string {
+  return /\/v1$/.test(PPLX_BASE_URL) ? `${PPLX_BASE_URL}/async/sonar` : `${PPLX_BASE_URL}/v1/async/sonar`;
+}
+
+function buildAsyncRequest(params: PplxAsyncParams): Record<string, unknown> {
+  const request: Record<string, unknown> = {
+    model: params.model || PPLX_ASYNC_MODEL,
+    messages: [{ role: "user", content: params.query }],
+  };
+  if (params.search_mode) request.search_mode = params.search_mode;
+  if (Array.isArray(params.search_domain_filter) && params.search_domain_filter.length) {
+    request.search_domain_filter = params.search_domain_filter.slice(0, 20);
+  }
+  return { request };
+}
+
+// 单次 HTTP（提交 / 轮询）带短超时，避免单个请求卡死。
+async function pplxFetchJson(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  outerSignal?: AbortSignal,
+): Promise<any> {
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  if (outerSignal) outerSignal.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...init, signal: ctrl.signal });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Perplexity async HTTP ${res.status}: ${text.slice(0, 500)}`);
+    try { return JSON.parse(text); } catch { throw new Error(`Perplexity async 响应非 JSON: ${text.slice(0, 300)}`); }
   } finally {
     clearTimeout(timer);
-    if (signal) signal.removeEventListener("abort", onAbort);
+    if (outerSignal) outerSignal.removeEventListener("abort", onAbort);
+  }
+}
+
+// 从异步任务的 response（chat completion 对象）提取答案 + 来源。
+function formatAsyncResponse(job: any): string {
+  const resp = job?.response ?? {};
+  const answer = String(resp?.choices?.[0]?.message?.content ?? "").trim();
+  const searchResults: Array<{ title?: string; url?: string }> = Array.isArray(resp?.search_results) ? resp.search_results : [];
+  const citations: string[] = Array.isArray(resp?.citations) ? resp.citations : [];
+  const parts: string[] = [answer || "(无回答内容)"];
+  const sources = searchResults.length
+    ? searchResults.map((r, i) => `[${i + 1}] ${(r.title || "").trim()} ${r.url || ""}`.trim())
+    : citations.map((c, i) => `[${i + 1}] ${c}`);
+  if (sources.length) parts.push("", "来源：", ...sources);
+  return parts.join("\n").trim();
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// 提交异步任务，返回 {id, status}。probeOnly=true 时不轮询（用于联通性测试、不消耗大量积分）。
+async function submitAsyncSonar(
+  params: PplxAsyncParams,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<{ id: string; status: string }> {
+  const job = await pplxFetchJson(
+    asyncSonarBase(),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(buildAsyncRequest(params)),
+    },
+    60_000,
+    signal,
+  );
+  const id = String(job?.id ?? "").trim();
+  if (!id) throw new Error(`提交成功但未返回任务 id：${JSON.stringify(job).slice(0, 300)}`);
+  return { id, status: String(job?.status ?? "UNKNOWN") };
+}
+
+// 轮询直到 COMPLETED / FAILED 或超总时长。
+async function pollAsyncSonar(
+  id: string,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const url = `${asyncSonarBase()}/${encodeURIComponent(id)}`;
+  const deadline = Date.now() + PPLX_ASYNC_MAX_WAIT_MS;
+  for (;;) {
+    const job = await pplxFetchJson(url, { headers: { Authorization: `Bearer ${apiKey}` } }, 60_000, signal);
+    const status = String(job?.status ?? "").toUpperCase();
+    if (status === "COMPLETED") return formatAsyncResponse(job);
+    if (status === "FAILED") {
+      const reason = job?.error_message || job?.response?.error?.message || "未说明原因";
+      throw new Error(`异步任务失败（FAILED）：${reason}`);
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`异步轮询超时：总时长超过 ${Math.round(PPLX_ASYNC_MAX_WAIT_MS / 1000)} 秒（任务 id=${id} 仍未完成，可稍后用 id 重查）`);
+    }
+    await sleep(PPLX_ASYNC_POLL_INTERVAL_MS);
   }
 }
 
@@ -579,6 +813,82 @@ export default async function (pi: ExtensionAPI) {
         }
         return {
           content: [{ type: "text", text: `Perplexity Pro 搜索失败：${e instanceof Error ? e.message : String(e)}` }],
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // --------------------------------------------------------------------------
+  // Perplexity 异步 Sonar（提交 + 轮询，默认 sonar-deep-research 深度研究）
+  // --------------------------------------------------------------------------
+  pi.registerTool({
+    name: "perplexity_async_sonar",
+    label: "Perplexity Async Sonar (深度研究异步)",
+    description:
+      "【收费・真异步・最重】走 Perplexity 官方异步接口（POST /v1/async/sonar 提交 + 轮询取结果），" +
+      "默认模型 sonar-deep-research，会跨大量来源做详尽研究并生成带引用的深度报告。服务端排队执行，" +
+      "可能耗时几分钟到十几分钟，客户端自动轮询。token 费明显比 pro_search 更贵，**仅用于真正需要长时间深度调研的任务**。" +
+      "日常搜索用（免费）variflight_web_search；多步推理用 perplexity_pro_search。probe_only=true 时只提交并返回任务 id/status（不轮询，用于联通性测试）。",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "需要深度研究的复杂问题（中/英文均可）。描述越具体，研究报告越有针对性。",
+        },
+        model: {
+          type: "string",
+          description: "异步模型，默认 sonar-deep-research。测试联通性时可传更便宜的 sonar 降低成本。",
+        },
+        search_mode: {
+          type: "string",
+          enum: ["web", "academic", "sec"],
+          description: "搜索来源域：web（默认全网）、academic（学术）、sec（美股 SEC 披露）。",
+        },
+        search_domain_filter: {
+          type: "array",
+          items: { type: "string" },
+          description: "域名过滤（最多 20 个）。白名单直接写域名；黑名单加 - 前缀（如 -reddit.com）。",
+        },
+        probe_only: {
+          type: "boolean",
+          description: "仅提交不轮询，立即返回任务 id 与初始 status。用于验证接口联通而不等待（不产生完整深度研究的大量 token 费）。默认 false。",
+        },
+      },
+      required: ["query"],
+    },
+    async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
+      const cred = readPerplexityApiKey();
+      if ("error" in cred) {
+        return { content: [{ type: "text", text: `Perplexity 异步 Sonar 不可用：${cred.error}` }], isError: true };
+      }
+      const query = String(params?.query ?? "").trim();
+      if (!query) {
+        return { content: [{ type: "text", text: "query 不能为空" }], isError: true };
+      }
+      const asyncParams: PplxAsyncParams = {
+        query,
+        model: params?.model,
+        search_mode: params?.search_mode,
+        search_domain_filter: params?.search_domain_filter,
+      };
+      try {
+        const { id, status } = await submitAsyncSonar(asyncParams, cred.apiKey, signal);
+        if (params?.probe_only === true) {
+          return {
+            content: [{ type: "text", text: `异步任务已提交（probe_only）。id=${id} status=${status}\n可稍后用该 id 轮询 GET /v1/async/sonar/${id} 取结果。` }],
+            isError: false,
+          };
+        }
+        const text = await pollAsyncSonar(id, cred.apiKey, signal);
+        return { content: [{ type: "text", text: `任务 id=${id}\n\n${text}` }], isError: false };
+      } catch (e) {
+        if ((e as any)?.name === "AbortError") {
+          return { content: [{ type: "text", text: "Perplexity 异步 Sonar 已取消" }], isError: true };
+        }
+        return {
+          content: [{ type: "text", text: `Perplexity 异步 Sonar 失败：${e instanceof Error ? e.message : String(e)}` }],
           isError: true,
         };
       }
