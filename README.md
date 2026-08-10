@@ -154,6 +154,20 @@ pi 自动发现 `~/.pi/agent/skills/` 下的技能，因此它们在**每个工�
    - 放行内置解释器 `$PI_BUNDLED_PYTHON`，让 `ppt-master` 直接用它（重依赖现成）；
    - **用户自己的项目 Python 代码仍被强制走干净的 `.venv`**（方案 B：技能依赖留在内置 Python 的 base，不污染项目 venv）。
 
+### 子智能体跑的是内置 pi（`PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT`）
+
+`pi-subagents` 起子智能体的方式是 **spawn 一个子 `pi` 进程**，而它找 pi 的顺序是：`PI_SUBAGENT_PI_BINARY` → 显式 package root → 探 `process.argv[1]` → 从自身安装位置 `import.meta.resolve`。桌面端两条自动路径**都会落空**：服务进程的 `argv[1]` 是 next 的 bin（不在 pi-coding-agent 目录下），而 `pi-subagents` 装在 `~/.pi/agent/npm`，那里的 `@earendil-works/` 是空的——桌面端从不往那儿 npm install pi。于是 `getPiSpawnCommand()` 兜底成裸 `"pi"`，**走 PATH 上全局安装的那个 pi**（本机实测：父进程 0.84.0，子智能体却是全局的 0.81.1），空电脑上则直接没有。
+
+所以 `main.js` 启动服务时注入：
+
+```
+PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT = <runtimeDir>/node_modules/@earendil-works/pi-coding-agent
+```
+
+`pi-subagents` 收到后自己会 `realpath` + 校验 `package.json.name`（`resolveExplicitPiPackageRoot`），校验不过就当没设——所以我们这边也先校验一次，不合格只记日志、不导出，让 PATH 兜底逻辑原样保留。命中后子智能体的启动命令变成 `<内置 node.exe> <内置 cli.js> …`：与父进程同版本 pi、同 node，继承同一份配置与模型认证，不依赖全局 pi / Node / npm。用 `runtimeDir()` 取值，所以运行时是就地跑还是被复制到 `%APPDATA%\Pi Agent\runtime` 都对。启动日志里的 `piPackageRoot=` 可核对，`(unresolved)` 就表示又退回 PATH 了。
+
+**自带的两个扩展也吃这个变量**：`auto-session-title`（起标题）和 `language-guard`（子 pi 复核）同样要 spawn 子 pi，原本也是裸 `"pi"` 走 PATH，同一个坑。两者现在共用同一条解析：环境变量在 → `process.execPath` + `<root>/dist/cli.js`；不在 → **原样回退到 PATH**，所以在终端里直接跑 `pi`（没有这个变量）时行为与改动前完全一致，扩展照常可用。`language-guard` 的 `LANG_GUARD_SUBPI_CMD` 若显式设了则优先级最高，`/lang-guard` 面板新增「复核用 pi」一行，起不来时第一眼就能看出走的是内置还是 PATH。
+
 ## 安装注意（首启是否秒开取决于安装目录）
 
 | 装到哪 | 可写? | 首启 |

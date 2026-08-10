@@ -55,7 +55,9 @@
  *   LANG_GUARD_MAX_RESTARTS   同一任务最大重启次数。默认 2。
  *   LANG_GUARD_RESEND_TASK    默认 true：重启时重发原始任务全文。
  *   LANG_GUARD_SUBPI_VERIFY   默认 false。设 1/true 开启子 pi 权威复核。
- *   LANG_GUARD_SUBPI_CMD      子 pi 可执行命令。默认 "pi"。
+ *   LANG_GUARD_SUBPI_CMD      子 pi 可执行命令。显式指定则优先；不设时先用桌面端注入的
+ *                             内置 pi（PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT），
+ *                             都没有才回退到 PATH 上的 "pi"。
  *   LANG_GUARD_SUBPI_MODEL    子 pi 复核用的模型。默认 "gpt-5.6-luna"（CPA，配合
  *                             --thinking off，指令遵循好、便宜）。切勿开思考。
  *   LANG_GUARD_SUBPI_PROVIDER 子 pi 复核用的 provider。默认 "cliproxy-dmit"。必须与
@@ -64,6 +66,8 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const MESSAGE_TYPE = "language-guard-correction";
@@ -172,9 +176,52 @@ function judgeLanguage(rawText: string, minChars: number, minHanRatio: number): 
  * 可选：起子 pi 进程做权威复核。返回 true=确实非中文(drift)，false=其实是中文，
  * undefined=复核失败/超时（调用方回退到本地判定）。
  */
+/**
+ * 复核用的子 pi 该怎么起。优先级：
+ *   1) LANG_GUARD_SUBPI_CMD —— 用户显式指定，永远优先。
+ *   2) 桌面端(Pi Agent)注入的 PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT ——
+ *      与 pi-subagents 共用同一个变量，外壳那边已校验过 package.json。命中就用
+ *      <本进程的 node> <该包>/dist/cli.js：与父进程同一份 pi、同一个 node，
+ *      继承同一份配置与模型认证。
+ *   3) PATH 上的 pi。
+ *
+ * 第 2 条不是锦上添花：打包版的机器上 PATH 里往往压根没有全局 pi（子进程 ENOENT，
+ * 复核静默失败并回退到本地判定），装了也常常版本对不上（实测父 0.84.0 / 全局 0.81.1）。
+ */
+function piSpawnCommand(explicitCmd: string | undefined, args: string[]): { command: string; args: string[] } {
+	// Windows 上 pi 是 pi.cmd：直接 spawn("pi") 报 ENOENT，spawn("pi.cmd") 报 EINVAL，
+	// 而 shell:true 会导致 stdout/退出信号传递异常（实测超时）。
+	// 可靠方案：显式通过 cmd.exe /c 调用。其它平台直接 spawn。
+	const isWindows = process.platform === "win32";
+	if (explicitCmd) {
+		return isWindows
+			? { command: "cmd.exe", args: ["/c", explicitCmd, ...args] }
+			: { command: explicitCmd, args };
+	}
+	const root = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT?.trim();
+	if (root) {
+		// node 直接跑 cli.js，绕开 cmd.exe —— 顺带免掉上面那圈 .cmd 包装。
+		const cli = path.join(root, "dist", "cli.js");
+		if (existsSync(cli)) return { command: process.execPath, args: [cli, ...args] };
+	}
+	return isWindows ? { command: "cmd.exe", args: ["/c", "pi", ...args] } : { command: "pi", args };
+}
+
+/** /lang-guard 面板用：说清这次会起哪个 pi。 */
+function describePiCommand(explicitCmd: string | undefined): string {
+	if (explicitCmd) return `${explicitCmd}（LANG_GUARD_SUBPI_CMD）`;
+	const root = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT?.trim();
+	if (root) {
+		const cli = path.join(root, "dist", "cli.js");
+		if (existsSync(cli)) return `内置 ${cli}`;
+		return `PATH 上的 pi（注入的包根不可用: ${root}）`;
+	}
+	return "PATH 上的 pi";
+}
+
 function verifyWithSubPi(sampleText: string, timeoutMs: number): Promise<boolean | undefined> {
 	return new Promise((resolve) => {
-		const cmd = process.env.LANG_GUARD_SUBPI_CMD || "pi";
+		const cmd = process.env.LANG_GUARD_SUBPI_CMD;
 		// 默认复核模型：gpt-5.6-luna（CPA / cliproxy-dmit，thinking off）。实测中/英/日
 		// 分类 7/7 全对；而默认的 claude-opus-4.8（reasoning）在极短分类任务上会返回空
 		// 或把文本当对话，不可靠。可用 LANG_GUARD_SUBPI_MODEL 覆盖。
@@ -208,12 +255,7 @@ function verifyWithSubPi(sampleText: string, timeoutMs: number): Promise<boolean
 		if (model) args.push("--model", model);
 		if (provider) args.push("--provider", provider);
 
-		// Windows 上 pi 是 pi.cmd：直接 spawn("pi") 报 ENOENT，spawn("pi.cmd") 报 EINVAL，
-		// 而 shell:true 会导致 stdout/退出信号传递异常（实测超时）。
-		// 可靠方案：显式通过 cmd.exe /c 调用。其它平台直接 spawn。
-		const isWindows = process.platform === "win32";
-		const spawnCmd = isWindows ? "cmd.exe" : cmd;
-		const spawnArgs = isWindows ? ["/c", cmd, ...args] : args;
+		const { command: spawnCmd, args: spawnArgs } = piSpawnCommand(cmd, args);
 
 		let child: ReturnType<typeof spawn>;
 		try {
@@ -460,6 +502,8 @@ export default function languageGuard(pi: ExtensionAPI) {
 				`最小汉字占比: ${getFloatEnv("LANG_GUARD_MIN_HAN_RATIO", DEFAULT_MIN_HAN_RATIO)}`,
 				`子 pi 复核: ${isTruthyEnv(process.env.LANG_GUARD_SUBPI_VERIFY) ? "开" : "关"}`,
 				`复核模型: ${process.env.LANG_GUARD_SUBPI_PROVIDER || "cliproxy-dmit"}/${process.env.LANG_GUARD_SUBPI_MODEL || "gpt-5.6-luna"}`,
+				// 复核起不来时第一眼要看的就是这条：内置 pi 还是 PATH 上的 pi。
+				`复核用 pi: ${describePiCommand(process.env.LANG_GUARD_SUBPI_CMD)}`,
 				`最大重启次数: ${getIntEnv("LANG_GUARD_MAX_RESTARTS", DEFAULT_MAX_RESTARTS)}`,
 				`当前任务已重启: ${restartCount} 次`,
 				`待处理重启: ${pendingRestart ? "是" : "否"}`,

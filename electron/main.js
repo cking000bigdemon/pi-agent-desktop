@@ -42,6 +42,10 @@ const extensionsManager = require("./features/extensions-manager");
 const isWindows = process.platform === "win32";
 const REGISTRY = process.env.PI_WEB_REGISTRY || "https://registry.npmmirror.com";
 const AUTO_CHECK = process.env.PI_WEB_AUTO_UPDATE_CHECK !== "0";
+// The pi CLI package name, as pi-subagents spells it when validating a package
+// root handed to it via this env var (its shared/utils.ts + runs/shared/pi-spawn.ts).
+const PI_CODING_AGENT_PACKAGE = "@earendil-works/pi-coding-agent";
+const PI_CODING_AGENT_PACKAGE_ROOT_ENV = "PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT";
 // When this app launch began (epoch ms). Captured at main-process load so it
 // survives embedded-server restarts; the dashboard counts token usage from
 // session turns at/after this moment ("since this pi-agent was opened").
@@ -147,6 +151,43 @@ function piWebPkgDir() {
 }
 function nextBinPath() {
   return path.join(runtimeDir(), "node_modules", "next", "dist", "bin", "next");
+}
+// The pi CLI package inside our runtime — i.e. what `pi` actually IS in this app.
+function bundledPiAgentDir() {
+  return path.join(runtimeDir(), "node_modules", "@earendil-works", "pi-coding-agent");
+}
+// Tell `pi-subagents` which pi to spawn subagents with.
+//
+// Left alone it probes process.argv[1] — which for our server is next's bin,
+// nowhere near pi-coding-agent — and then import.meta.resolve() from its own
+// install under ~/.pi/agent/npm, where @earendil-works is EMPTY because the
+// desktop never npm-installs the agent there. Both miss, and getPiSpawnCommand()
+// falls back to a bare "pi" on PATH: a separately installed, independently
+// versioned global CLI, or nothing at all. Handing it the bundled root makes
+// every subagent run the SAME pi as its parent on the SAME bundled node (the
+// package spawns process.execPath + <root>/dist/cli.js) and inherit this
+// process's config/auth env — no global pi, node or npm required. Correct
+// whether the runtime runs in place or was copied to userData, since
+// runtimeDir() has already settled that.
+//
+// Validated the way pi-subagents validates it (resolveExplicitPiPackageRoot):
+// a root whose package.json name doesn't match is silently ignored there, so
+// check here too and say so in the log rather than exporting an env var that
+// quietly does nothing. Returns {} on any failure — the PATH fallback still
+// applies, exactly as before.
+function bundledPiAgentEnv() {
+  const root = bundledPiAgentDir();
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+    if (pkg.name !== PI_CODING_AGENT_PACKAGE) {
+      dbg(`bundled pi package root is "${pkg.name}", expected ${PI_CODING_AGENT_PACKAGE} — subagents fall back to PATH`);
+      return {};
+    }
+  } catch (e) {
+    dbg(`bundled pi package root unusable at ${root} (${(e && e.message) || e}) — subagents fall back to PATH`);
+    return {};
+  }
+  return { [PI_CODING_AGENT_PACKAGE_ROOT_ENV]: root };
 }
 function updaterCtx() {
   return {
@@ -568,10 +609,12 @@ function waitForServer(url, timeoutMs = 60000) {
 function startServer(port) {
   const nextBin = nextBinPath();
   const pkgDir = piWebPkgDir();
+  const piAgentEnv = bundledPiAgentEnv();
   dbg(
     `startServer node=${bundledNodeExe()} nodeExists=${fs.existsSync(bundledNodeExe())} ` +
       `nextBin=${nextBin} nextExists=${fs.existsSync(nextBin)} pkgDir=${pkgDir} ` +
-      `nextDirExists=${fs.existsSync(path.join(pkgDir, ".next"))} port=${port}`
+      `nextDirExists=${fs.existsSync(path.join(pkgDir, ".next"))} port=${port} ` +
+      `piPackageRoot=${piAgentEnv[PI_CODING_AGENT_PACKAGE_ROOT_ENV] || "(unresolved)"}`
   );
   if (!fs.existsSync(path.join(pkgDir, ".next"))) {
     throw new Error(`pi-web .next not found in runtime: ${pkgDir}`);
@@ -593,6 +636,8 @@ function startServer(port) {
           .filter(Boolean)
           .join(path.delimiter),
         ...bundledPythonGuardEnv(),
+        // Subagents spawn the bundled pi, not whatever `pi` PATH happens to hold.
+        ...piAgentEnv,
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

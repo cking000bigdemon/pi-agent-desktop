@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import * as path from "node:path";
 const CUSTOM_TYPE = "auto-session-title";
 const MAX_QUERY_CHARS = 4000;
 const TIMEOUT_MS = 45_000;
@@ -131,10 +133,34 @@ async function generateTitle(query: string): Promise<string> {
 	return title;
 }
 
+/**
+ * 起标题用的子 pi 该用哪个可执行文件。
+ *
+ * 桌面端(Pi Agent)启动服务时会把内置 pi 包的根目录注入
+ * PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT（与 pi-subagents 共用同一个变量，
+ * 外壳那边已校验过 package.json）。命中就用 <本进程的 node> <该包>/dist/cli.js
+ * —— 与父进程同一份 pi、同一个 node，继承同一份配置与模型认证。
+ *
+ * 这不是锦上添花：打包版的机器上 PATH 里往往压根没有全局 pi（子进程直接 ENOENT，
+ * 标题静默退化成截断首句），装了也常常版本对不上（实测父 0.84.0 / 全局 0.81.1）。
+ * 在终端里直接跑 pi 时该变量不存在，按原样回退到 PATH 查找。
+ */
+function piSpawnCommand(args: string[]): { command: string; args: string[] } {
+	const root = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT?.trim();
+	if (root) {
+		const cli = path.join(root, "dist", "cli.js");
+		if (existsSync(cli)) return { command: process.execPath, args: [cli, ...args] };
+	}
+	// PATH 回退。Windows 上 pi 是 pi.cmd：直接 spawn("pi") 报 ENOENT、spawn("pi.cmd")
+	// 报 EINVAL，所以显式经 cmd.exe 调用。
+	return process.platform === "win32"
+		? { command: "cmd.exe", args: ["/d", "/s", "/c", "pi.cmd", ...args] }
+		: { command: "pi", args };
+}
+
 function runPi(args: string[]): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const command = process.platform === "win32" ? "cmd.exe" : "pi";
-		const finalArgs = process.platform === "win32" ? ["/d", "/s", "/c", "pi.cmd", ...args] : args;
+		const { command, args: finalArgs } = piSpawnCommand(args);
 		const child = spawn(command, finalArgs, {
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
