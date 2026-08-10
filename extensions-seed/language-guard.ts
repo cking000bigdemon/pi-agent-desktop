@@ -25,8 +25,11 @@
  * 子 pi 复核（可选，默认关闭）：
  *   - 开启后，仅在本地判定为 drift 时，起一个干净的子 pi 进程（不加载扩展/
  *     技能/上下文文件、thinking off）让模型裁决 zh/other。
- *   - 默认复核模型 azure/gpt-5.5（实测 7/7，3-4s 返回）。不要用 reasoning 模型
- *     （如 claude-opus）——它们在极短分类任务上会返回空或把文本当对话。
+ *   - 默认复核模型 gpt-5.6-luna（CPA / cliproxy-dmit，实测 7/7，thinking off 下
+ *     行为等同非 reasoning）。原默认 variflight 网关的 azure/gpt-5.5 → azure3/gpt-5.6-luna
+ *     已随网关整体下线废弃（2026-08）。
+ *     不要开着 thinking 用 reasoning 模型（如 claude-opus）——它们在极短分类
+ *     任务上会返回空或把文本当对话；本扩展固定传 --thinking off。
  *   - 样本经 stdin（UTF-8）传入，避开 Windows cmd.exe /c 的中文参数乱码问题。
  *   - 复核在 agent_settled 阶段进行；复核判定“其实是中文”则撤销重启，
  *     失败/超时则回退到本地判定结果（继续重启）。
@@ -53,8 +56,10 @@
  *   LANG_GUARD_RESEND_TASK    默认 true：重启时重发原始任务全文。
  *   LANG_GUARD_SUBPI_VERIFY   默认 false。设 1/true 开启子 pi 权威复核。
  *   LANG_GUARD_SUBPI_CMD      子 pi 可执行命令。默认 "pi"。
- *   LANG_GUARD_SUBPI_MODEL    子 pi 复核用的模型。默认 "azure/gpt-5.5"（非 reasoning、
- *                             指令遵循好）。切勿用 reasoning 模型。
+ *   LANG_GUARD_SUBPI_MODEL    子 pi 复核用的模型。默认 "gpt-5.6-luna"（CPA，配合
+ *                             --thinking off，指令遵循好、便宜）。切勿开思考。
+ *   LANG_GUARD_SUBPI_PROVIDER 子 pi 复核用的 provider。默认 "cliproxy-dmit"。必须与
+ *                             MODEL 配套：裸模型 id 会被解析到内置同名 provider 而失败。
  *   LANG_GUARD_SUBPI_TIMEOUT  子 pi 复核超时毫秒。默认 30000。
  */
 
@@ -170,10 +175,15 @@ function judgeLanguage(rawText: string, minChars: number, minHanRatio: number): 
 function verifyWithSubPi(sampleText: string, timeoutMs: number): Promise<boolean | undefined> {
 	return new Promise((resolve) => {
 		const cmd = process.env.LANG_GUARD_SUBPI_CMD || "pi";
-		// 默认复核模型：azure/gpt-5.5。实测它非 reasoning、指令遵循好，对
-		// 中/英/日分类 5/5 全对；而默认的 claude-opus-4.8（reasoning）在极短分类
-		// 任务上会返回空或把文本当对话，不可靠。可用 LANG_GUARD_SUBPI_MODEL 覆盖。
-		const model = process.env.LANG_GUARD_SUBPI_MODEL || "azure/gpt-5.5";
+		// 默认复核模型：gpt-5.6-luna（CPA / cliproxy-dmit，thinking off）。实测中/英/日
+		// 分类 7/7 全对；而默认的 claude-opus-4.8（reasoning）在极短分类任务上会返回空
+		// 或把文本当对话，不可靠。可用 LANG_GUARD_SUBPI_MODEL 覆盖。
+		// 2026-08：variflight 网关整体下线（azure/gpt-5.5 → azure3/gpt-5.6-luna 均废弃），
+		// 现默认指向 CPA 的 gpt-5.6-luna。
+		// 注意：必须同时指定 provider —— 裸 id "gpt-5.6-luna" 会被 pi 解析到内置的
+		// azure-openai-responses（无 API key，直接报 "No API key found"），实测必现。
+		const model = process.env.LANG_GUARD_SUBPI_MODEL || "gpt-5.6-luna";
+		const provider = process.env.LANG_GUARD_SUBPI_PROVIDER || "cliproxy-dmit";
 		// 指令为纯 ASCII，走 --append-system-prompt；待判定文本走 stdin。
 		// 关键：Windows 的 cmd.exe /c 无法正确传递 UTF-8 中文命令行参数（会乱码，
 		// 导致模型把中文误判为 other），因此样本必须经 stdin 传入（UTF-8 buffer）。
@@ -196,6 +206,7 @@ function verifyWithSubPi(sampleText: string, timeoutMs: number): Promise<boolean
 			sys,
 		];
 		if (model) args.push("--model", model);
+		if (provider) args.push("--provider", provider);
 
 		// Windows 上 pi 是 pi.cmd：直接 spawn("pi") 报 ENOENT，spawn("pi.cmd") 报 EINVAL，
 		// 而 shell:true 会导致 stdout/退出信号传递异常（实测超时）。
@@ -448,7 +459,7 @@ export default function languageGuard(pi: ExtensionAPI) {
 				`最小实义字符阈值: ${getIntEnv("LANG_GUARD_MIN_CHARS", DEFAULT_MIN_MEANINGFUL_CHARS)}`,
 				`最小汉字占比: ${getFloatEnv("LANG_GUARD_MIN_HAN_RATIO", DEFAULT_MIN_HAN_RATIO)}`,
 				`子 pi 复核: ${isTruthyEnv(process.env.LANG_GUARD_SUBPI_VERIFY) ? "开" : "关"}`,
-				`复核模型: ${process.env.LANG_GUARD_SUBPI_MODEL || "azure/gpt-5.5"}`,
+				`复核模型: ${process.env.LANG_GUARD_SUBPI_PROVIDER || "cliproxy-dmit"}/${process.env.LANG_GUARD_SUBPI_MODEL || "gpt-5.6-luna"}`,
 				`最大重启次数: ${getIntEnv("LANG_GUARD_MAX_RESTARTS", DEFAULT_MAX_RESTARTS)}`,
 				`当前任务已重启: ${restartCount} 次`,
 				`待处理重启: ${pendingRestart ? "是" : "否"}`,

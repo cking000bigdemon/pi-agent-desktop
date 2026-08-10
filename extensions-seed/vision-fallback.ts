@@ -12,7 +12,7 @@
  * - 连续图片轮安全:切换后(switched=true)不再重复切换;结束后才恢复
  *
  * 候选模型可用环境变量覆盖(逗号分隔 provider/modelId 对,分号分隔条目):
- *   VISION_MODEL_PREFERENCE="cliproxy-dmit/gpt-5.5;variflight/azure/gpt-5.5;variflight/aliyun/kimi/kimi-k3"
+ *   VISION_MODEL_PREFERENCE="cliproxy-dmit/gpt-5.6-sol;cliproxy-dmit/gpt-5.6-terra;variflight/aliyun/kimi/kimi-k3"
  *
  * 命令:
  *   /vision-model       显示当前模型与图片支持状态
@@ -24,11 +24,14 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** 默认候选多模态模型(provider, modelId),按优先级排序 */
+// 2026-08: variflight AI 网关整体下线，原 azure/gpt-5.5 与过渡的 azure3/gpt-5.6-* 均移除；
+// 图片能力优先走 CPA（cliproxy-dmit）的 gpt-5.6-*（三个型号实测 vision 均可用）。
 const DEFAULT_VISION_PREFERENCE: Array<[string, string]> = [
-  ["cliproxy-dmit", "gpt-5.5"],
+  ["cliproxy-dmit", "gpt-5.6-sol"],
+  ["cliproxy-dmit", "gpt-5.6-terra"],
+  ["cliproxy-dmit", "gpt-5.6-luna"],
   ["variflight", "openrouter/anthropic/claude-opus-5"],
   ["variflight", "openrouter/anthropic/claude-opus-4.8"],
-  ["variflight", "azure/gpt-5.5"],
   ["variflight", "aliyun/kimi/kimi-k3"],
   ["variflight", "feeyo/glm-5.2"],
 ];
