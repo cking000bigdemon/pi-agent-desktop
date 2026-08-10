@@ -3,7 +3,7 @@
  *
  * 本扩展注册四个互补的联网搜索工具，agent 应根据实际任务需要和成本选择：
  *
- *  1) `variflight_web_search`  —— 默认首选、**免费**。走 VariFlight AI 网关的
+ *  1) `web_search`            —— 默认首选、**免费**。走 CPA（CLIProxyAPI）的
  *     **Responses API**（/v1/responses，stream=true 流式接收）携带内置 web_search 工具，
  *     返回“带来源的 prose 答案”。适合要一句话结论 / 已综合好的回答，也是日常默认入口。
  *
@@ -16,28 +16,30 @@
  *     走 Perplexity **Sonar Pro 聊天补全**（/chat/completions，流式 + search_type=pro），
  *     模型自动多步检索 + 抓取页面内容后生成“带引用的深度 prose 答案”。
  *     仅在需要多步推理、复杂跨源综合时才用；简单查询不要用它（贵且慢）。
+ *     每次调用前必须由用户在确认对话框中明确同意；无交互 UI 时默认阻止。
  *
  *  4) `perplexity_async_sonar` —— **收费、真异步、最重**。走 Perplexity 官方异步接口
  *     POST /v1/async/sonar 提交任务、GET /v1/async/sonar/{id} 轮询取结果。默认模型
  *     `sonar-deep-research`（深度研究，token 费明显更贵；该异步接口仅接受此模型）。
  *     适合要跨大量来源、可能跑几分钟到十几分钟的长任务；服务端排队执行，客户端只
  *     轮询，不怕断连。日常搜索用 1)，多步推理用 3)，仅真正需要深度调研才用本工具。
+ *     每次调用（包括 probe_only）前必须由用户在确认对话框中明确同意；无交互 UI 时默认阻止。
  *
  * pi 引擎不原生支持服务端 web_search（provider 切 openai-responses 也只是聊天，
  * 不会自动注入 tools:[{web_search}]），所以这里用自定义工具补齐能力。
  *
  * === 凭证来源 ===
- * variflight_web_search：读 ~/.pi/agent/models.json 里**已配置的 provider**
- *   （默认 `variflight`）的 apiKey + baseURL —— 不新增密钥、不硬编码。
+ * web_search：读 ~/.pi/agent/models.json 里**已配置的 provider**
+ *   （默认 `cliproxy-dmit`）的 apiKey + baseURL —— 不新增密钥、不硬编码。
  * perplexity_search / perplexity_pro_search / perplexity_async_sonar：优先读环境变量 PERPLEXITY_API_KEY；
  *   若无，则回退读 models.json 里名为 `perplexity` 的 provider 的 apiKey。
  * apiKey 三态：字面量 / `!shell命令`(取 stdout) / 环境变量名（与 pi 自身一致）。
  *
  * === 可选环境变量 ===
- *   VF_WEB_SEARCH_PROVIDER      models.json 里用作凭证来源的 provider 名，默认 "variflight"
- *   VF_WEB_SEARCH_MODEL         variflight_web_search 调用的模型，默认 "azure/gpt-5.5"
- *   VF_WEB_SEARCH_TIMEOUT       variflight_web_search 流式搜索【总时长上限】(ms)，默认 600000（10 分钟）
- *   VF_WEB_SEARCH_IDLE_TIMEOUT  variflight_web_search 流式【空闲超时】(ms)，默认 90000：
+ *   VF_WEB_SEARCH_PROVIDER      models.json 里用作凭证来源的 provider 名，默认 "cliproxy-dmit"
+ *   VF_WEB_SEARCH_MODEL         web_search 调用的模型，默认 "gpt-5.6-luna"
+ *   VF_WEB_SEARCH_TIMEOUT       web_search 流式搜索【总时长上限】(ms)，默认 600000（10 分钟）
+ *   VF_WEB_SEARCH_IDLE_TIMEOUT  web_search 流式【空闲超时】(ms)，默认 90000：
  *                               超过该时长未收到任何 SSE 事件才判定卡死。只要服务端持续
  *                               推事件（web_search 各阶段/文本增量），就不会被掐断。
  *   PERPLEXITY_API_KEY          Perplexity 密钥（search / pro search / async sonar 共用，首选来源）
@@ -52,7 +54,7 @@
  *   PERPLEXITY_ASYNC_POLL_INTERVAL async 轮询间隔(ms)，默认 5000
  *
  * === 2026-07-27 改造说明 ===
- * variflight_web_search 由「一次性 POST + 90s 硬超时」改为「stream=true 流式 SSE 接收 +
+ * web_search 由「一次性 POST + 90s 硬超时」改为「stream=true 流式 SSE 接收 +
  * 空闲/总时长双计时器」。原因：网关侧 web_search + 综合常超过 90s（实测 114s），旧的
  * 单次硬超时必然掐断；流式下服务端持续推事件，只需对“无数据”设限。注意：网关的
  * Responses background 模式（POST 返回 queued 后 GET /v1/responses/{id} 轮询）已实测
@@ -71,9 +73,9 @@ import * as path from "node:path";
 import { execSync } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const PROVIDER = process.env.VF_WEB_SEARCH_PROVIDER || "variflight";
-const MODEL = process.env.VF_WEB_SEARCH_MODEL || "azure/gpt-5.5";
-// variflight_web_search（流式）：总时长上限 + 空闲超时（详见头部注释）
+const PROVIDER = process.env.VF_WEB_SEARCH_PROVIDER || "cliproxy-dmit";
+const MODEL = process.env.VF_WEB_SEARCH_MODEL || "gpt-5.6-luna";
+// web_search（流式）：总时长上限 + 空闲超时（详见头部注释）
 const TOTAL_TIMEOUT_MS = Number(process.env.VF_WEB_SEARCH_TIMEOUT) > 0 ? Number(process.env.VF_WEB_SEARCH_TIMEOUT) : 600_000;
 const IDLE_TIMEOUT_MS = Number(process.env.VF_WEB_SEARCH_IDLE_TIMEOUT) > 0 ? Number(process.env.VF_WEB_SEARCH_IDLE_TIMEOUT) : 90_000;
 // perplexity_search 单次超时（默认 90s，结构化搜索本身很快）
@@ -124,6 +126,11 @@ function readProviderCreds(): Creds | { error: string } {
   return { baseURL, apiKey };
 }
 
+// 兼容 models.json 的 baseURL 两种常见写法：以 /v1 结尾，或只写服务根路径。
+function responsesUrl(baseURL: string): string {
+  return /\/v1$/i.test(baseURL) ? `${baseURL}/responses` : `${baseURL}/v1/responses`;
+}
+
 // Responses API 输出抽取：output[] 里 message 项的 content[].output_text 拼接
 function extractText(data: any): string {
   if (typeof data?.output_text === "string" && data.output_text.trim()) return data.output_text.trim();
@@ -157,7 +164,7 @@ async function doSearch(query: string, creds: Creds, signal?: AbortSignal): Prom
   resetIdle();
 
   try {
-    const res = await fetch(`${creds.baseURL}/v1/responses`, {
+    const res = await fetch(responsesUrl(creds.baseURL), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -169,7 +176,7 @@ async function doSearch(query: string, creds: Creds, signal?: AbortSignal): Prom
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new Error(`VariFlight 网关 HTTP ${res.status}: ${body.slice(0, 500)}`);
+      throw new Error(`CPA 网关 HTTP ${res.status}: ${body.slice(0, 500)}`);
     }
     // 网关若忽略 stream 参数返回普通 JSON，按旧逻辑解析（优雅降级）
     const ctype = res.headers.get("content-type") || "";
@@ -451,7 +458,7 @@ async function perplexityProSearch(
   const onAbort = () => ctrl.abort();
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
-  // 与 variflight_web_search 同款双计时器：空闲超时（每收一个数据块重置）+ 总时长硬上限
+  // 与 web_search 同款双计时器：空闲超时（每收一个数据块重置）+ 总时长硬上限
   let abortCause: "idle" | "total" | null = null;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   const resetIdle = () => {
@@ -605,11 +612,54 @@ async function pollAsyncSonar(
 }
 
 export default async function (pi: ExtensionAPI) {
+  // 高费用 Perplexity 工具的强制确认闸门。确认发生在 HTTP 请求发出之前；
+  // 无交互 UI（print/json 模式）时默认阻止，避免自动化流程意外产生高额费用。
+  pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName !== "perplexity_pro_search" && event.toolName !== "perplexity_async_sonar") {
+      return undefined;
+    }
+
+    const input = (event.input && typeof event.input === "object" ? event.input : {}) as Record<string, unknown>;
+    const query = String(input.query ?? "").trim();
+    const queryPreview = query.length > 300 ? `${query.slice(0, 300)}…` : query || "（未提供查询内容）";
+
+    if (!ctx.hasUI) {
+      return {
+        block: true,
+        reason: `${event.toolName} 属于高费用工具，当前模式没有交互式确认界面，已阻止请求（未产生费用）`,
+      };
+    }
+
+    const isAsync = event.toolName === "perplexity_async_sonar";
+    const model = isAsync ? String(input.model ?? PPLX_ASYNC_MODEL) : PPLX_PRO_MODEL;
+    const probeOnly = isAsync && input.probe_only === true;
+    const costWarning = isAsync
+      ? [
+          "费用：深度研究按 token 计费，成本可能较高。",
+          `执行方式：${probeOnly ? "仅提交、不在本地轮询（probe_only）" : "提交并持续轮询结果"}。`,
+          "注意：probe_only 只停止本地轮询；任务提交后仍会在服务端执行并可能产生完整费用。",
+        ].join("\n")
+      : "费用：$0.008/次 Pro Search 请求 + Sonar Pro 输入/输出 token 费。";
+
+    const confirmed = await ctx.ui.confirm(
+      "确认使用高费用 Perplexity 工具",
+      `工具：${event.toolName}\n模型：${model}\n${costWarning}\n\n查询：${queryPreview}\n\n是否确认发起本次收费请求？`,
+    );
+
+    if (!confirmed) {
+      return {
+        block: true,
+        reason: `用户取消了 ${event.toolName} 调用；请求未发送，未产生本次费用`,
+      };
+    }
+    return undefined;
+  });
+
   pi.registerTool({
-    name: "variflight_web_search",
-    label: "Web Search (VariFlight, 免费)",
+    name: "web_search",
+    label: "Web Search (CPA GPT-5.6 Luna, 免费)",
     description:
-      "【默认首选・免费】通用联网搜索入口。通过 VariFlight AI 网关联网搜索，返回带来源的实时 prose 答案。" +
+      "【默认首选・免费】通用联网搜索入口。通过 CPA（CLIProxyAPI）的 GPT-5.6 Luna 联网搜索，返回带来源的实时 prose 答案。" +
       "适用于绝大多数日常搜索：查询最新新闻、实时数据、联网核实事实、获取公开披露文件/页面的真实 URL。" +
       "成本：免费。输入自然语言查询；如需链接可在 query 中要求返回来源 URL。" +
       "选择建议：除非明确需要多条结构化来源（用 perplexity_search）或复杂多步深度研究（用 perplexity_pro_search），否则优先用本工具。",
@@ -626,7 +676,7 @@ export default async function (pi: ExtensionAPI) {
     async execute(_toolCallId: string, params: any, signal?: AbortSignal) {
       const creds = readProviderCreds();
       if ("error" in creds) {
-        return { content: [{ type: "text", text: `VariFlight 联网搜索不可用：${creds.error}` }], isError: true };
+        return { content: [{ type: "text", text: `CPA 联网搜索不可用：${creds.error}` }], isError: true };
       }
       const query = String(params?.query ?? "").trim();
       if (!query) {
@@ -640,7 +690,7 @@ export default async function (pi: ExtensionAPI) {
           return { content: [{ type: "text", text: "联网搜索已取消或超时" }], isError: true };
         }
         return {
-          content: [{ type: "text", text: `VariFlight 联网搜索失败：${e instanceof Error ? e.message : String(e)}` }],
+          content: [{ type: "text", text: `CPA 联网搜索失败：${e instanceof Error ? e.message : String(e)}` }],
           isError: true,
         };
       }
@@ -657,7 +707,7 @@ export default async function (pi: ExtensionAPI) {
       "【收费：$0.005/次请求，仅按请求计费、无 token 额外费】通过 Perplexity Search API 获取结构化、" +
       "按相关性排序的实时网页搜索结果（每条含 title / url / snippet / date）。适用于需要多条真实来源 URL、" +
       "按域名/语言/地区过滤、多角度（多查询）检索的场景。支持多查询（queries，最多 5 条）与预算控制。" +
-      "选择建议：仅当任务确实需要多条可核实的排序来源时才用；若只要一句话结论请用（免费的）variflight_web_search；" +
+      "选择建议：仅当任务确实需要多条可核实的排序来源时才用；若只要一句话结论请用（免费的）web_search；" +
       "若需多步推理的深度综合回答请用 perplexity_pro_search。",
     parameters: {
       type: "object",
@@ -756,10 +806,11 @@ export default async function (pi: ExtensionAPI) {
     name: "perplexity_pro_search",
     label: "Perplexity Pro Search ($0.008/次 + token)",
     description:
-      "【收费：$0.008/次 Pro Search 请求 + Sonar Pro 的 token 费（输入/输出按量计费），三个搜索工具中最贵】" +
+      "【调用前必须经用户确认】【收费：$0.008/次 Pro Search 请求 + Sonar Pro 的 token 费（输入/输出按量计费），三个搜索工具中最贵】" +
       "走 Perplexity Sonar Pro 聊天补全（流式 + search_type=pro），模型会自动多步检索、抓取页面内容并多轮推理，" +
-      "最终生成带引用的深度综合答案。仅适用于需要跨多个来源多步推理的复杂问题（如专题调研、多因素对比、需边搜边推导的任务）。" +
-      "选择建议：简单事实/新闻查询不要用它（贵且慢），改用免费的 variflight_web_search；" +
+      "最终生成带引用的深度综合答案。每次真正发起请求前都会弹出费用确认；用户拒绝或无交互 UI 时不会发送请求。" +
+      "仅适用于需要跨多个来源多步推理的复杂问题（如专题调研、多因素对比、需边搜边推导的任务）。" +
+      "选择建议：简单事实/新闻查询不要用它（贵且慢），改用免费的 web_search；" +
       "只要一批可核实的排序链接用 perplexity_search（$0.005/次）。除非任务确实需要深度多步研究，否则不要选本工具。",
     parameters: {
       type: "object",
@@ -826,10 +877,12 @@ export default async function (pi: ExtensionAPI) {
     name: "perplexity_async_sonar",
     label: "Perplexity Async Sonar (深度研究异步)",
     description:
-      "【收费・真异步・最重】走 Perplexity 官方异步接口（POST /v1/async/sonar 提交 + 轮询取结果），" +
-      "默认模型 sonar-deep-research，会跨大量来源做详尽研究并生成带引用的深度报告。服务端排队执行，" +
-      "可能耗时几分钟到十几分钟，客户端自动轮询。token 费明显比 pro_search 更贵，**仅用于真正需要长时间深度调研的任务**。" +
-      "日常搜索用（免费）variflight_web_search；多步推理用 perplexity_pro_search。probe_only=true 时只提交并返回任务 id/status（不轮询，用于联通性测试）。",
+      "【调用前必须经用户确认】【收费・真异步・最重】走 Perplexity 官方异步接口（POST /v1/async/sonar 提交 + 轮询取结果），" +
+      "默认模型 sonar-deep-research，会跨大量来源做详尽研究并生成带引用的深度报告。每次提交前都会弹出费用确认；" +
+      "用户拒绝或无交互 UI 时不会发送请求。服务端排队执行，可能耗时几分钟到十几分钟，客户端自动轮询。" +
+      "token 费明显比 pro_search 更贵，**仅用于真正需要长时间深度调研的任务**。" +
+      "日常搜索用（免费）web_search；多步推理用 perplexity_pro_search。" +
+      "probe_only=true 仅表示提交后不在本地轮询；服务端任务仍会执行并可能产生完整费用，因此同样必须确认。",
     parameters: {
       type: "object",
       properties: {
@@ -853,7 +906,7 @@ export default async function (pi: ExtensionAPI) {
         },
         probe_only: {
           type: "boolean",
-          description: "仅提交不轮询，立即返回任务 id 与初始 status。用于验证接口联通而不等待（不产生完整深度研究的大量 token 费）。默认 false。",
+          description: "仅提交不在本地轮询，立即返回任务 id 与初始 status。注意：服务端任务仍会继续执行并可能产生完整费用；调用前同样需要用户确认。默认 false。",
         },
       },
       required: ["query"],

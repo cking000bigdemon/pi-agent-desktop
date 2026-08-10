@@ -38,20 +38,11 @@
       "deps": []
     },
     {
-      "id": "agents-md-injector",
-      "file": "agents-md-injector.ts",
-      "name": "AGENTS.md 目录上下文注入",
-      "summary": "读写文件时自动注入所在目录链上的 AGENTS.md",
-      "description": "监听 read/write/edit/ls/grep/find 等文件类工具调用，从目标目录向上收集 AGENTS.md 并按外层→内层注入会话，每个文件每会话只注入一次，/reload 后仍保留已注入集合。灵感来自 Claude Code 的 PreToolUse hook。",
-      "default": true,
-      "deps": []
-    },
-    {
-      "id": "claude-md-injector",
-      "file": "claude-md-injector.ts",
-      "name": "CLAUDE.md 子目录注入",
-      "summary": "补齐 pi 原生只向上找、不向下找 CLAUDE.md 的空缺",
-      "description": "pi 原生只在 cwd 及其祖先目录里加载首个 AGENTS.md／CLAUDE.md，子目录的 CLAUDE.md 永远不会被加载。本扩展为 Claude Code 维护的仓库补上这一段；同一目录若已有 AGENTS.md 则让位给 AGENTS.md，不会重复注入。",
+      "id": "context-file-injector",
+      "file": "context-file-injector.ts",
+      "name": "目录上下文文件注入",
+      "summary": "补齐 pi 原生只向上找、不向下找 AGENTS.md／CLAUDE.md 的空缺",
+      "description": "pi 原生只加载 cwd 及其祖先目录的上下文文件，agent 进到子目录干活时那里的 AGENTS.md／CLAUDE.md 永远不会被加载。本扩展扫描提示词里的路径引用、监听 read/write/edit/ls/grep/find 等文件类工具调用，从目标目录向配置的根目录回溯，按 pi v0.84.0 的同目录优先级（AGENTS.override.md > AGENTS.md > AGENTS.MD > CLAUDE.md > CLAUDE.MD）每个目录最多选一个文件注入，每个文件每会话只注入一次；首次发现新上下文的写／改操作会被拦下，让模型先读到规则再动手。取代旧的 agents-md-injector 与 claude-md-injector（沿用它们的会话状态，续跑的会话不会重复注入）。根目录／单文件字节上限／是否拦截首写可用 CONTEXT_FILE_INJECTOR_* 环境变量覆盖。",
       "default": true,
       "deps": []
     },
@@ -83,11 +74,11 @@
       "deps": []
     },
     {
-      "id": "variflight-web-search",
-      "file": "variflight-web-search.ts",
-      "name": "联网搜索（VariFlight / Perplexity）",
+      "id": "web-search-tools",
+      "file": "web_search_tools.ts",
+      "name": "联网搜索（Web Search / Perplexity）",
       "summary": "四个互补的联网搜索工具，按成本分级",
-      "description": "补齐 pi 不原生支持的服务端联网搜索：variflight_web_search（免费，走 VariFlight AI 网关 Responses API 的内置 web_search，返回带来源的结论）、perplexity_search（$0.005/次，返回结构化 ranked results）、perplexity_pro_search（$0.008/次 + token 费，Sonar Pro 多步深度检索）、perplexity_async_sonar（真异步 /v1/async/sonar 提交＋轮询，默认 sonar-deep-research，服务端排队执行可跑几分钟到十几分钟，token 费最贵，仅用于长时间深度调研）。凭证读 models.json 已配置的 provider 或 PERPLEXITY_API_KEY，不新增密钥。",
+      "description": "补齐 pi 不原生支持的服务端联网搜索：web_search（免费，走 CPA 网关 Responses API 的内置 web_search，流式接收，返回带来源的结论）、perplexity_search（$0.005/次，返回结构化 ranked results）、perplexity_pro_search（$0.008/次 + token 费，Sonar Pro 多步深度检索）、perplexity_async_sonar（真异步 /v1/async/sonar 提交＋轮询，默认 sonar-deep-research，服务端排队执行可跑几分钟到十几分钟，token 费最贵，仅用于长时间深度调研）。后两个每次调用前都要用户在确认框里点同意。凭证读 models.json 已配置的 provider 或 PERPLEXITY_API_KEY，不新增密钥。取代旧的 variflight-web-search（首个工具由 variflight_web_search 更名为 web_search）。",
       "default": true,
       "deps": []
     },

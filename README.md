@@ -3,14 +3,14 @@
 把 [pi-web](https://github.com/agegr/pi-web)（pi 编程智能体的网页界面，npm 包 **`@agegr/pi-web`**）打包成一个**开箱即用的桌面应用**：
 双击即用，没有浏览器、没有地址栏、没有常驻终端窗口，**目标机器无需预装任何运行时**。
 
-它不只是「pi-web 套壳」——而是一台**电池全含的 AI 工作站**：内置 Node 与 Python 两套运行时、6 个默认扩展、一套 OKF 知识库技能（编译 / 查询 / 检查 / 可视化）和 PPT 生成技能 `ppt-master`，拷到空电脑双击即可使用。
+它不只是「pi-web 套壳」——而是一台**电池全含的 AI 工作站**：内置 Node 与 Python 两套运行时、10 个默认扩展、一套 OKF 知识库技能（编译 / 查询 / 检查 / 可视化）和 PPT 生成技能 `ppt-master`，拷到空电脑双击即可使用。
 
 **核心特性**
 - 🧳 **内置 Node + Python 运行时** —— 目标机器无需 Node/npm/Python，拷到空电脑双击即用。
 - ⚡ **就地运行，首启秒开** —— 直接从（可写的）安装目录跑 pi-web，不做首启复制。
 - 🔄 **运行时自更新** —— App 内「检查更新」直接装 `@agegr/pi-web@latest`（npm 包自带预构建 `.next`，免编译），独立更新 pi-web + pi-coding-agent，**无需重新发版、不碰外壳代码**。安装走 **staging + 校验通过才原子换入**，更新失败/断网/中途被杀都不会损坏正在用的运行时。
 - 🩺 **启动自检与自愈** —— 每次启动先验证运行时的原生模块是否真的能加载；发现是安装被中断留下的残缺文件，自动按锁定版本重装修复（不趁机升级），而不是让用户对着 `server not ready in time` 干瞪眼。
-- 🧩 **默认扩展随装** —— 9 个 pi 扩展每次启动从仓库同步进 `~/.pi/agent/extensions/`，仓库为唯一真源。
+- 🧩 **默认扩展随装** —— 10 个 pi 扩展每次启动从仓库同步进 `~/.pi/agent/extensions/`，仓库为唯一真源。
 - 📚 **默认技能随装** —— OKF 知识库技能 + `ppt-master` 演示文稿生成，每次启动同步进 `~/.pi/agent/skills/`，所有工作目录可用。
 - 🐍 **零依赖 Python 技能** —— 内置 Python 让 Python 技能「装完即用、离线零 pip」；环境守卫强制用户项目走干净的 `.venv`。
 - 🪟 **原生窗口** —— 内嵌 Next.js 服务隐藏运行在随机 `127.0.0.1` 端口，关窗即停。
@@ -30,7 +30,7 @@ pi-web-desktop/
 ├── vendor/node/        # 内置 Node.js 运行时(node.exe + npm) → resources/node            ← 构建输入(手动下载)
 ├── vendor/python/      # 内置 Python(python-build-standalone + ppt-master 依赖预装) → resources/python ← 构建输入(npm run seed:python)
 ├── runtime-seed/       # @agegr/pi-web 的 npm 生产安装(含 .next) → resources/runtime-seed          ← 构建输入(npm run seed)
-├── extensions-seed/    # 默认随装的 9 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
+├── extensions-seed/    # 默认随装的 10 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
 ├── skills-seed/        # 默认随装的技能(wiki 系列 OKF + ppt-master,源码已入库) → resources/skills-seed
 ├── scripts/            # seed-python.ps1 + vendor-python-requirements.txt(供给 vendor/python)
 │                       # + test-runtime-guard.js(运行时守卫回归测试,npm run test:guard)
@@ -40,7 +40,7 @@ pi-web-desktop/
 ```
 
 > **构建输入 vs 入库源码**:`vendor/`、`runtime-seed/`、`extensions-seed/node_modules` 都体积大、已 gitignore,需按[下文](#从零准备构建输入)重新准备。本地若存在 `pi-web/` 目录,那是已退役的 fork 工作副本(`cking000bigdemon/pi-web`,曾发布为 `@cking000/pi-web`),桌面端已回归上游包,不再是构建输入。
-> **已纳入版本库**:`extensions-seed/` 的 9 个 `.ts` 扩展源码 + `manifest.json`(扩展目录清单)、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
+> **已纳入版本库**:`extensions-seed/` 的 10 个 `.ts` 扩展源码 + `manifest.json`(扩展目录清单)、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
 
 ## 运行架构
 
@@ -92,22 +92,36 @@ pi-web-desktop/
 | 手动删掉某个已勾选的扩展 | 下次启动补装（想彻底不要就在选择器里取消勾选） |
 | 新版本新增的默认扩展 | 自动装上（纯新增文件，不会覆盖任何东西） |
 | 依赖 `node_modules` | 只在**有选中的扩展声明依赖**时才部署（目前只有 `mcp-bridge` 需要 `@modelcontextprotocol/client`，约 15MB），缺失或 lockfile 变化时刷新 |
+| 某个扩展从 manifest 里**移除**（退役） | 应用不再管它，但**也不会删**已经部署的那份——它会继续被 pi 加载。退役必须配一次手动清理，见下 |
+
+> [!WARNING]
+> **从 0.3.0 升级上来需要手动停用三个已退役扩展。** `agents-md-injector`、`claude-md-injector` 被 `context-file-injector` 取代，`variflight-web-search` 被 `web_search_tools` 取代；它们已从 `extensions-seed/` 和 manifest 里删除，但 `extensions-manager` 从不删除已部署的文件，所以老机器上旧文件仍会激活，和新扩展**同时**跑：目录上下文会被重复注入，`perplexity_*` 三个工具会被重复注册。
+> 升级后请到 `~/.pi/agent/extensions/` 把这三个 `.ts` 改名成 `.ts.disabled`（pi 自己的停用约定），或直接删掉：
+>
+> ```
+> agents-md-injector.ts      -> agents-md-injector.ts.disabled
+> claude-md-injector.ts      -> claude-md-injector.ts.disabled
+> variflight-web-search.ts   -> variflight-web-search.ts.disabled
+> ```
+>
+> 它们已不在 manifest 里，所以「扩展管理」窗口里看不到，只能手动改名。
 
 判定「改没改过」用的是**忽略换行符**的内容哈希（`core.autocrlf` 会把种子检出成 CRLF，纯换行差异不能算用户改动）。选择与部署记录写在 `userData/extensions-state.json`，`~/.pi` 里不留任何附加文件。实现见 `electron/features/extensions-manager.js`（策略注释在文件头）、`electron/extensions-picker.html`、`electron/extensions-preload.js`。
 
-### 内置的 9 个扩展
+### 内置的 10 个扩展
 
 | 扩展 | 作用 |
 |---|---|
-| `agents-md-injector` | 把子目录 AGENTS.md 注入会话上下文 |
 | `auto-session-title` | 自动生成会话标题 |
-| `claude-md-injector` | `agents-md-injector` 姊妹版：把**子目录** CLAUDE.md 注入会话上下文（根目录 pi 原生已加载；目录同时有 AGENTS.md 时让位，不重复注入） |
+| `context-file-injector` | **目录上下文文件注入**：补上 pi 原生只向上找、不向下找的空缺——agent 进到子目录干活时，把该目录链上的 AGENTS.md／CLAUDE.md 注入会话（同目录按 `AGENTS.override.md > AGENTS.md > AGENTS.MD > CLAUDE.md > CLAUDE.MD` 只取一个），每文件每会话一次；首次发现新上下文的写／改会被拦下让模型先读。取代已退役的 `agents-md-injector` + `claude-md-injector`（沿用其会话状态，续跑不重复注入） |
 | `general-agent-prompt` | 通用 agent 系统提示增强 |
+| `image-generation` | **生图工具**：`generate_image_gpt`（OpenAI gpt-image-2）与 `generate_image_gemini`（gemini-3.1-flash-image），图片存到当前 workspace 的 `ai-output/temporary/pictures/` 并返回路径，不把 base64 塞回上下文 |
 | `language-guard` | **语言守卫**：检测 assistant 回复语言漂移（非中文主导即拦截），中断后注入中文要求并自动重发原任务；可选子 pi 复核，防死循环限重启次数 |
 | `mcp-bridge` | 桥接 `mcp.json` 里的 MCP server（stdio/sse/http）；MCP 工具默认**惰性加载**（`mcp_search_tools` 按需搜索激活，或 `/mcp-load` 手动），支持 eager/confirm/cwd 等单服配置。协议默认 `auto`：先 `server/discover` 探测，2026-07-28 无状态协议与 2025 版 server 通吃（`PI_MCP_PROTOCOL` 可改 legacy 或钉版本）；server 中途要用户补参数走 MRTR，弹 pi 对话框回填（`PI_MCP_ELICIT=0` 关） |
 | `python-workdir-guard` | **Python 工作目录守卫**：自动建 `.venv`、强制 Python 走 `.venv`（见下「零依赖 Python」） |
 | `skill-shell-injection` | **Skill 动态上下文注入**：补上 Pi 原生没有的 Claude Code 式 `` !\`cmd\` `` / ```` ```! ```` 语法——SKILL.md/prompt 被加载时在 shell 执行内嵌命令、把输出内联替换进内容；钩 `read` 自动生效，另提供 `/skillx <name>` 直调 |
-| `variflight-web-search` | **联网搜索**（三个互补工具，按成本分级）：`variflight_web_search`（免费，VariFlight AI 网关 Responses API + 内置 web_search，返回带来源的结论）、`perplexity_search`（$0.005/次，结构化 ranked results）、`perplexity_pro_search`（$0.008/次 + token 费，Sonar Pro 多步深度检索） |
+| `vision-fallback` | **多模态图片输入回退**：当前模型不支持读图而用户又发了图时，本轮自动 `setModel` 切到支持图片的模型，`agent_settled` 后切回原模型与思考级别 |
+| `web-search-tools` | **联网搜索**（四个互补工具，按成本分级，文件名 `web_search_tools.ts`）：`web_search`（免费，CPA 网关 Responses API + 内置 web_search，流式接收，返回带来源的结论）、`perplexity_search`（$0.005/次，结构化 ranked results）、`perplexity_pro_search`（$0.008/次 + token 费，Sonar Pro 多步深度检索）、`perplexity_async_sonar`（真异步 `/v1/async/sonar`，默认 `sonar-deep-research`，可跑十几分钟）；后两个每次调用前都要用户点确认。取代已退役的 `variflight-web-search`（首个工具由 `variflight_web_search` 更名为 `web_search`） |
 
 运行时 `@earendil-works/pi-coding-agent` 由 pi 注入扩展加载器，**不打包**；唯一需打包的依赖是 `@modelcontextprotocol/client`（MCP SDK v2，mcp-bridge 用），由 `npm run seed:extensions` 准备。
 
@@ -169,7 +183,7 @@ mkdir runtime-seed; cd runtime-seed; npm init -y
 npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com
 cd ..
 
-# 2b. 默认扩展的共享依赖(9 个 .ts 扩展源码已入库;此步只装它们的 node_modules)
+# 2b. 默认扩展的共享依赖(10 个 .ts 扩展源码已入库;此步只装它们的 node_modules)
 npm run seed:extensions
 
 # 3. 内置 Node 运行时(win-x64)

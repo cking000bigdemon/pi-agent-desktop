@@ -22,7 +22,7 @@
  * === 凭证来源 ===
  * 读 ~/.pi/agent/models.json 里【已配置的 provider】(默认 cliproxy-dmit) 的
  * apiKey + baseUrl —— 不新增密钥、不硬编码。apiKey 三态：字面量 / "!shell命令"(取
- * stdout) / 环境变量名（与 pi 自身及 variflight-web-search 扩展一致）。
+ * stdout) / 环境变量名（与 pi 自身及 web_search_tools 扩展一致）。
  *
  * === 可选环境变量 ===
  *   IMAGE_GEN_PROVIDER    models.json 里用作凭证来源的 provider 名，默认 "cliproxy-dmit"

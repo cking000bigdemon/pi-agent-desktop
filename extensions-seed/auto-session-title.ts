@@ -15,9 +15,17 @@ interface TitleEntryData {
 
 export default function (pi: ExtensionAPI) {
 	let titleRequested = false;
+	let runtimeActive = true;
 
 	pi.on("session_start", async (_event, ctx) => {
+		runtimeActive = true;
 		titleRequested = sessionAlreadyHasTitle(ctx);
+	});
+
+	// /reload、/new、/resume 等会使当前扩展实例的 pi/ctx 立即失效。
+	// 标题生成是后台异步任务，必须在旧实例关闭后丢弃结果，不能继续写会话。
+	pi.on("session_shutdown", async () => {
+		runtimeActive = false;
 	});
 
 	pi.on("input", async (event, ctx) => {
@@ -36,7 +44,11 @@ export default function (pi: ExtensionAPI) {
 		if (query.startsWith("/")) return { action: "continue" as const };
 
 		titleRequested = true;
-		void generateAndRecordTitle(pi, ctx, query);
+		void generateAndRecordTitle(pi, ctx, query, () => runtimeActive).catch((err) => {
+			// reload/session replacement 与后台标题生成竞态时，旧 ctx 失效属于预期取消。
+			if (!runtimeActive || isStaleExtensionContextError(err)) return;
+			console.error("auto-session-title failed:", err);
+		});
 
 		return { action: "continue" as const };
 	});
@@ -69,7 +81,12 @@ function sessionAlreadyHasTitle(ctx: ExtensionContext): boolean {
 	return ctx.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === CUSTOM_TYPE);
 }
 
-async function generateAndRecordTitle(pi: ExtensionAPI, ctx: ExtensionContext, query: string): Promise<void> {
+async function generateAndRecordTitle(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	query: string,
+	isActive: () => boolean,
+): Promise<void> {
 	let title: string;
 	let generator: TitleEntryData["generator"] = "pi-subprocess";
 	let error: string | undefined;
@@ -81,6 +98,9 @@ async function generateAndRecordTitle(pi: ExtensionAPI, ctx: ExtensionContext, q
 		error = err instanceof Error ? err.message : String(err);
 		title = fallbackTitle(query);
 	}
+
+	// 生成期间可能执行了 /reload 或切换会话；旧实例的 pi/ctx 此时不可再使用。
+	if (!isActive()) return;
 
 	recordTitle(pi, ctx, title, query, generator, error);
 
@@ -176,6 +196,10 @@ function recordTitle(
 	} satisfies TitleEntryData);
 
 	ctx.ui.setTitle(finalTitle);
+}
+
+function isStaleExtensionContextError(error: unknown): boolean {
+	return error instanceof Error && error.message.includes("This extension ctx is stale after session replacement or reload");
 }
 
 function sanitizeTitle(raw: string): string {
