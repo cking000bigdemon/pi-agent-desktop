@@ -34,12 +34,25 @@ python ~/.pi/agent/skills/okf-visualizer/scripts/build_visualizer.py --vault . -
 
 - **Nodes** — one per concept, sized by link degree, colored by `domain`.
 - **Edges** — concept→concept links parsed from article bodies.
-- **Sidebar** — domain legend (click to toggle), concept filter box, and a detail
+- **Sidebar** — domain legend (click to toggle), concept search box, and a detail
   panel (description, domain, link count, sources) when a node is clicked.
-- Drag a node to reposition, scroll to zoom, drag the background to pan.
+- Drag a node to reposition (it pins where you drop it), scroll to zoom, drag the
+  background to pan.
+- **Legend toggles remove concepts from the layout**, not just from the paint pass
+  — hiding a domain stops it tugging on what is left. **Search only dims**, so the
+  layout never reshuffles while you type.
+- Labels are placed greedily by link degree, skipping any that would overlap one
+  already drawn: zoomed out you get the best-connected concepts, and more appear
+  as you zoom in.
 
 ## Notes
 
-- Pure stdlib Python; the renderer is inline vanilla JS (no dependencies).
+- Pure stdlib Python. The renderer is [force-graph](https://github.com/vasturiano/force-graph)
+  v1.51.4 (MIT), vendored at `vendor/force-graph.min.js` and inlined into the
+  output — nothing is fetched at runtime, so the file stays offline-portable.
+- The layout **settles and then freezes** (`warmupTicks` + `cooldownTicks`); once
+  frozen the canvas stops repainting, so an idle graph costs no CPU. If you change
+  the force parameters, re-verify that it still comes to rest — the renderer this
+  replaced had no cooldown and vibrated forever.
 - Re-run after each compile to refresh the graph.
 - The HTML embeds a snapshot of the bundle data at generation time.
