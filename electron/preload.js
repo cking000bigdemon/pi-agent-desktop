@@ -1613,6 +1613,46 @@ ipcRenderer.on("pi-web-desktop:update-notice", (_e, notice) => {
 })();
 
 // ---------------------------------------------------------------------------
+// Theme sync — pi-web's light/dark toggle → the native window frame
+// ---------------------------------------------------------------------------
+// The title bar is drawn by Windows, not by the page, so pi-web's own theme
+// toggle used to leave it stranded in the OS theme (white bar over a dark UI).
+// pi-web marks dark mode with a `dark` class on <html> — that class IS the
+// theme, for both the toggle and the boot-time restore from
+// localStorage["pi-theme"] — so watching it covers every path without depending
+// on pi-web internals beyond the class name. main.js turns each report into a
+// nativeTheme change (see features/native-theme.js).
+(function syncNativeTheme() {
+  // Only the real pi-web page — the shell's own file:// pages are dark-only.
+  if (location.protocol !== "http:") return;
+
+  let last = null;
+
+  function report() {
+    const theme = document.documentElement.classList.contains("dark") ? "dark" : "light";
+    if (theme === last) return;
+    last = theme;
+    ipcRenderer.send("pi-web-desktop:theme-changed", theme);
+  }
+
+  function init() {
+    report();
+    // The class lands at three different times — an inline head script on first
+    // paint, React hydration, and each toggle click — so the watch is standing
+    // rather than one-shot. attributeFilter keeps it to class changes on <html>.
+    new MutationObserver(report).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+  }
+
+  // Preload runs before the page's scripts; <html> normally exists by then, but
+  // fall back to DOMContentLoaded rather than throwing if it does not.
+  if (document.documentElement) init();
+  else document.addEventListener("DOMContentLoaded", init, { once: true });
+})();
+
+// ---------------------------------------------------------------------------
 // Brand rename — "Pi Web" → "Pi Agent" in the embedded page
 // ---------------------------------------------------------------------------
 // The shell ships as "Pi Agent" (productName / window title / installer), but

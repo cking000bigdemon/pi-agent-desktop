@@ -38,6 +38,7 @@ const subagents = require("./features/subagents");
 const toolsFeature = require("./features/tools");
 const directoryPicker = require("./features/directory-picker");
 const extensionsManager = require("./features/extensions-manager");
+const nativeThemeSync = require("./features/native-theme");
 
 const isWindows = process.platform === "win32";
 const REGISTRY = process.env.PI_WEB_REGISTRY || "https://registry.npmmirror.com";
@@ -1030,6 +1031,21 @@ ipcMain.handle("pi-web-desktop:select-directory", (event) => {
 });
 
 // ---------------------------------------------------------------------------
+// Theme sync (pi-web's light/dark toggle → native window frame)
+// ---------------------------------------------------------------------------
+// preload.js reports the page's theme on load and on every toggle; this repaints
+// the OS-drawn title bar to match (see features/native-theme.js). Fire-and-forget
+// from the renderer — nothing in the page depends on the result.
+ipcMain.on("pi-web-desktop:theme-changed", (event, theme) => {
+  const sender = BrowserWindow.fromWebContents(event.sender);
+  // Only the main pi-web window speaks for the app theme; the shell's own
+  // windows render a fixed dark page and must not flip the frame.
+  if (sender !== win) return;
+  const applied = nativeThemeSync.set(theme, { userDataDir: app.getPath("userData"), win });
+  dbg(`theme-changed: page reported ${JSON.stringify(theme)} -> ${applied || "ignored"}`);
+});
+
+// ---------------------------------------------------------------------------
 // Extension picker window (first run + App → 扩展管理…)
 // ---------------------------------------------------------------------------
 // A local file:// window rendering extensions-picker.html through its own
@@ -1145,6 +1161,13 @@ async function manageExtensions() {
 // Window + lifecycle
 // ---------------------------------------------------------------------------
 function createWindow() {
+  // Paint the native frame in the theme pi-web last reported, BEFORE the window
+  // exists — otherwise a light-themed pi-web on a dark Windows (or the reverse)
+  // shows the wrong title bar for the seconds it takes the page to load and
+  // report in. No record yet (first run) leaves themeSource at "system".
+  const restored = nativeThemeSync.restore(app.getPath("userData"));
+  dbg(`native theme restored: ${restored || "none recorded (following the OS)"}`);
+
   win = new BrowserWindow({
     width: 1320,
     height: 880,
