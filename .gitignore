@@ -29,6 +29,10 @@ pi-web/
 __pycache__/
 *.pyc
 
+# Project venv the installed app's venv guard creates from resources/python
+# when a Python skill runs against this repo. Regenerated on demand.
+.venv/
+
 # OS / editor
 .DS_Store
 Thumbs.db

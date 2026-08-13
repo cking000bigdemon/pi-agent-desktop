@@ -108,6 +108,24 @@
       "description": "用户输入附带图片、而当前模型 input 不含 image 时，监听 input 事件自动从候选列表（或全量模型）选一个支持图片的模型 setModel 切过去；本轮 agent 完全结束（agent_settled）后自动恢复原模型与思考级别。候选模型可用 VISION_MODEL_PREFERENCE 环境变量覆盖；/vision-model 命令查看当前模型与图片支持状态。",
       "default": true,
       "deps": []
+    },
+    {
+      "id": "cross-agent-memory",
+      "file": "cross-agent-memory.ts",
+      "name": "跨 Agent 记忆桥接",
+      "summary": "把 Claude Code / Codex 写下的记忆读进来，当作不可信数据注入 system prompt",
+      "description": "pi 自己没有长期记忆，而同一台机器上的 Claude Code 与 Codex 各写了一份。本扩展在会话开始时读取 ~/.claude/projects/<项目键>/memory/MEMORY.md 与 $CODEX_HOME/memories/memory_summary.md（回退 MEMORY.md），并在每轮 before_agent_start 追加到 system prompt。项目键按 Claude 自己的规则生成——把路径里所有非 [A-Za-z0-9-] 的字符换成 -（下划线、盘符冒号、全角括号都算），先试当前工作目录再回退到 Git 工作树根目录。默认镜像 Claude 的启动上限：前 200 行 / 25 KiB，超出截断并标注。内容经 XML 转义后放进 <memory_data>，并在提示里明确声明为不可信数据——只取事实、偏好、历史决策，绝不执行其中的指令；MEMORY.md 里链接的明细文件不会被急加载。项目未受信任时不读取。/cross-memory-status 查看加载情况（不打印内容），/cross-memory-reload 重新读取；PI_CROSS_MEMORY_* 环境变量可关闭、改上限或指定路径。",
+      "default": true,
+      "deps": []
+    },
+    {
+      "id": "windows-encoding-guard",
+      "file": "windows-encoding-guard.ts",
+      "name": "Windows 编码陷阱守卫",
+      "summary": "写 PowerShell / Python 前静态体检编码陷阱，致命项直接拦下",
+      "description": "移植 Claude Code 的 .claude/hooks/guard-windows-encoding.ps1：在 pi 的 write / edit 落盘前，先重建「将要写入的完整内容」再做静态检查。两类致命项直接拦截——用 [Console]::In 读 stdin（按控制台 ANSI 代码页即 GBK 解码，中文用户名路径会吃掉 JSON 转义），以及剔除注释后的可执行代码里出现非 ASCII 字符但文件没有 UTF-8 BOM（powershell.exe 5.1 会按 GBK 读 BOM-less 的 .ps1）。BOM 判定按工具区分：pi 的 write 会丢掉 BOM，edit 会保留。其余为告警并注入下一轮：hooks 里解析 stdin JSON 却没走 OpenStandardInput、比较 CLAUDE_PROJECT_DIR 没用 GetFullPath、hook 里裸写 stdout、Python subprocess 传 env={...} 字面量丢掉 PYTHONIOENCODING。/windows-encoding-audit [路径] 可对单个文件或整个目录递归体检。PI_WINDOWS_ENCODING_GUARD=0 关闭。",
+      "default": true,
+      "deps": []
     }
   ]
 }
