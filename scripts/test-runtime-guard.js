@@ -331,6 +331,49 @@ function writeGoodTree(dir, version, { truncateNative = false, scratch = false, 
     }
   }
 
+  console.log("\n[9] isNewer — prereleases decide whether dsh can ever update");
+  {
+    // Plain releases (pi-web's whole history) must keep behaving as before.
+    ok("patch bump", U.isNewer("0.8.9", "0.8.8"));
+    ok("minor bump", U.isNewer("0.9.0", "0.8.99"));
+    ok("major bump", U.isNewer("1.0.0", "0.9.9"));
+    ok("same version is not newer", !U.isNewer("0.8.8", "0.8.8"));
+    ok("downgrade is not newer", !U.isNewer("0.8.7", "0.8.8"));
+    ok("missing installed counts as newer", U.isNewer("0.1.0", null));
+
+    // The case that motivated the rewrite: the old truncate-at-"-" comparison
+    // reported these as equal, so dsh would never have offered an update.
+    ok("rc.6 > rc.5", U.isNewer("0.1.0-rc.6", "0.1.0-rc.5"));
+    ok("rc.5 is not > rc.6", !U.isNewer("0.1.0-rc.5", "0.1.0-rc.6"));
+    ok("rc.10 > rc.9 (numeric, not lexical)", U.isNewer("0.1.0-rc.10", "0.1.0-rc.9"));
+    ok("release > its own prerelease", U.isNewer("0.1.0", "0.1.0-rc.6"));
+    ok("prerelease is not > the release", !U.isNewer("0.1.0-rc.6", "0.1.0"));
+    ok("next release > prerelease", U.isNewer("0.2.0-rc.1", "0.1.0"));
+    ok("longer identifier list wins", U.isNewer("0.1.0-rc.1.1", "0.1.0-rc.1"));
+    ok("numeric sorts below alphanumeric", U.isNewer("0.1.0-alpha", "0.1.0-1"));
+    ok("build metadata is ignored", !U.isNewer("0.1.0+build2", "0.1.0+build1"));
+  }
+
+  console.log("\n[10] verifyRuntime — dsh's own landmark list");
+  {
+    const DSH_SEED = path.join(REPO, "runtime-seed-dsh");
+    const dctx = { ...ctx, requiredFiles: G.DSH_REQUIRED_FILES };
+
+    // A pi-web tree must NOT satisfy the dsh checks (and vice versa) — that is
+    // the whole point of making the list per-runtime.
+    const piTree = path.join(TMP, "rt-pi-for-dsh");
+    writeGoodTree(piTree, "0.8.1");
+    const cross = await G.verifyRuntime(dctx, piTree);
+    ok("pi-web tree fails the dsh landmark checks", cross.ok === false, JSON.stringify(cross.failures.map((f) => f.label)));
+
+    if (fs.existsSync(path.join(DSH_SEED, "node_modules"))) {
+      const real = await G.verifyRuntime(dctx, DSH_SEED);
+      ok("the checkout's runtime-seed-dsh verifies", real.ok === true, JSON.stringify(real.failures));
+    } else {
+      skipped("real runtime-seed-dsh verifies", "runtime-seed-dsh not provisioned (npm run seed:dsh)");
+    }
+  }
+
   fs.rmSync(TMP, { recursive: true, force: true });
   console.log(`\n===== ${pass} passed, ${fail} failed, ${skip} skipped =====`);
   process.exit(fail ? 1 : 0);
