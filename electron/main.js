@@ -1316,6 +1316,36 @@ ipcMain.handle("pi-web-desktop:launch-info", () => {
   return { piVersion, dshVersion };
 });
 
+/**
+ * Start one runtime. The single path for every way a launch can be decided —
+ * the launcher's tiles, a remembered preference, PI_DESKTOP_LAUNCH — so the
+ * windowless-gap guard and the settle check below cannot apply to one route and
+ * not another.
+ */
+function launchTarget(pick) {
+  launchInProgress = true;
+  // Both entry points create their window synchronously before their first
+  // await, so the launcher can go away immediately without a windowless gap.
+  const started = pick === "dsh" ? dsh.open() : bootPi();
+  closeLauncher();
+  return started
+    .catch((e) => dbg(`launch ${pick} failed: ${(e && e.stack) || e}`))
+    .finally(() => {
+      launchInProgress = false;
+      // The guard suppresses window-all-closed for the whole start, not just
+      // the launcher gap — so a window closed WHILE its server was still
+      // booting (dsh's first run against a fresh $DSH_HOME takes tens of
+      // seconds) would otherwise leave the app running with no window and no
+      // way back in. Re-check once the launch has settled.
+      if (!app.isQuitting && BrowserWindow.getAllWindows().length === 0) {
+        dbg("launch settled with no window left — quitting");
+        app.isQuitting = true;
+        killAllServers();
+        app.quit();
+      }
+    });
+}
+
 ipcMain.on("pi-web-desktop:launch-choose", (_event, target, remember) => {
   const pick = target === "dsh" ? "dsh" : "pi";
   dbg(`launcher: chose ${pick}${remember ? " (remembered)" : ""}`);
@@ -1323,16 +1353,7 @@ ipcMain.on("pi-web-desktop:launch-choose", (_event, target, remember) => {
     writeLaunchPref(pick);
     Menu.setApplicationMenu(buildMenu()); // reflect the new default in the radio group
   }
-  launchInProgress = true;
-  // Both entry points create their window synchronously before their first
-  // await, so the launcher can go away immediately without a windowless gap.
-  const started = pick === "dsh" ? dsh.open() : bootPi();
-  closeLauncher();
-  started
-    .catch((e) => dbg(`launch ${pick} failed: ${(e && e.stack) || e}`))
-    .finally(() => {
-      launchInProgress = false;
-    });
+  launchTarget(pick);
 });
 
 ipcMain.on("pi-web-desktop:launch-cancel", () => {
@@ -1352,8 +1373,7 @@ async function boot() {
   const remembered = readLaunchPref();
   const target = override === "pi" || override === "dsh" ? override : override === "ask" ? null : remembered;
   dbg(`boot: override=${override || "(none)"} remembered=${remembered || "(none)"} -> ${target || "ask"}`);
-  if (target === "dsh") return dsh.open();
-  if (target === "pi") return bootPi();
+  if (target === "dsh" || target === "pi") return launchTarget(target);
   openLauncher();
 }
 
