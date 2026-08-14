@@ -24,16 +24,20 @@ pi-web-desktop/
 │   ├── updater.js      # npm 层:用内置 npm 查询版本 / 装到指定目录(installInto)
 │   ├── runtime-guard.js # 运行时完整性:启动校验、staging 安装、原子换入、崩溃恢复
 │   ├── preload.js      # 最小安全桥(contextIsolation 开启)—— 自定义能力的暴露入口
-│   ├── features/       # dashboard / subagents 等外壳后端逻辑
-│   ├── loading.html / updating.html / healing.html / error.html
+│   ├── features/       # dashboard / subagents / dsh(第二运行时) / pi-model-import 等外壳后端逻辑
+│   ├── launcher.html + launcher-preload.js   # 启动选择器(开 Pi Agent 还是 DeepSeek Harness)
+│   ├── loading.html / dsh-loading.html / updating.html / healing.html / error.html
 │   └── ui/             # ★ 自定义能力的前端页面(可选,见「开发约束」)
-├── vendor/node/        # 内置 Node.js 运行时(node.exe + npm) → resources/node            ← 构建输入(手动下载)
+├── vendor/node/        # 内置 Node.js 运行时(node.exe + npm) → resources/node            ← 构建输入(npm run seed:node)
 ├── vendor/python/      # 内置 Python(python-build-standalone + ppt-master 依赖预装) → resources/python ← 构建输入(npm run seed:python)
 ├── runtime-seed/       # @agegr/pi-web 的 npm 生产安装(含 .next) → resources/runtime-seed          ← 构建输入(npm run seed)
+├── runtime-seed-dsh/   # @deepseek-ai/dsh 的 npm 生产安装 → resources/runtime-seed-dsh          ← 构建输入(npm run seed:dsh)
+│                       # package.json(版本钉子)已入库,node_modules/lockfile 是构建输入
 ├── extensions-seed/    # 默认随装的 10 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
 ├── skills-seed/        # 默认随装的技能(wiki 系列 OKF + ppt-master,源码已入库) → resources/skills-seed
-├── scripts/            # seed-python.ps1 + vendor-python-requirements.txt(供给 vendor/python)
-│                       # + test-runtime-guard.js(运行时守卫回归测试,npm run test:guard)
+├── scripts/            # seed-node.ps1(供给 vendor/node,内含 dsh 要求的版本下限)
+│                       # + seed-python.ps1 + vendor-python-requirements.txt(供给 vendor/python)
+│                       # + test-runtime-guard.js(运行时守卫 / 版本比较回归测试,npm run test:guard)
 ├── build/              # 应用图标(icon.svg / icon.png / icon.ico)
 ├── electron-builder.yml
 └── package.json
@@ -41,6 +45,17 @@ pi-web-desktop/
 
 > **构建输入 vs 入库源码**:`vendor/`、`runtime-seed/`、`extensions-seed/node_modules` 都体积大、已 gitignore,需按[下文](#从零准备构建输入)重新准备。本地若存在 `pi-web/` 目录,那是已退役的 fork 工作副本(`cking000bigdemon/pi-web`,曾发布为 `@cking000/pi-web`),桌面端已回归上游包,不再是构建输入。
 > **已纳入版本库**:`extensions-seed/` 的 10 个 `.ts` 扩展源码 + `manifest.json`(扩展目录清单)、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
+
+## 启动选择器
+
+应用**先问你开哪个运行时**，再做任何运行时工作——这正是它排在最前面的理由：最终去 dsh 的那次启动，不该先把 pi-web 的种子拷贝、完整性校验、扩展/技能同步、`next start` 全跑一遍。
+
+- 两块 Metro 磁贴，各自显示磁盘上真实的版本号；`1` / `2` 选，`Enter` 确认，`Esc` 退出（什么都没起，直接退出）。
+- 勾「记住选择」后不再询问；`App → 启动时打开` 的单选组随时改回「每次询问」或换默认。偏好存 `userData/launch-preference.json`。
+- `PI_DESKTOP_LAUNCH=pi|dsh|ask` 可覆盖（快捷方式、自动化用）。
+- 选了一个之后，另一个仍可从 `App` 菜单打开，两者并存。
+
+> 关掉启动器与目标窗口出现之间有一个瞬间的「零窗口」，`window-all-closed` 在这期间必须**不**退出应用——`launchInProgress` 就是干这个的。
 
 ## 运行架构
 
@@ -68,6 +83,37 @@ pi-web-desktop/
 > 背景：早先"就地 `npm install`"被中断过两次，把正在使用的 `@next/swc-*.node` 写成了截断文件（PE 头合法、尾部缺失），Windows 拒绝加载 → `next.config.ts` 加载失败 → 服务起不来，用户只看到无从下手的 `server not ready in time`。
 
 数据目录沿用 pi 的 `~/.pi/agent`（会话、`models.json`、模型凭证），与终端 `pi`、全局 `pi-web` 共享。
+
+## DeepSeek Harness（第二个内置运行时，按需启动）
+
+菜单 `App → DeepSeek Harness` 打开 [dsh](https://github.com/deepseek-ai/deepseek-harness)。它与 pi-web 形态同构（`dsh web --host 127.0.0.1 --port <n>` 起 loopback HTTP 服务），因此复用了外壳全部现成机制：内置 node、种子拷贝、`runtime-guard` 的 staging+原子换入、空闲端口、就绪探测、独立窗口。实现全部在 `electron/features/dsh.js`。
+
+**按需启动**：boot 时**不**拉起，第一次点菜单才装/起；**关掉 dsh 窗口即停服务**（dsh 插件树很大，为一个可能一周开一次的功能常驻内存不划算）。实测冷启（全新 `$DSH_HOME`，要写 profile + 约 250 个 junction）约 39s，之后温启动约 2.4s。
+
+与 pi 窗口刻意**不共享**的四件事：
+
+1. **不挂 preload**。`preload.js` 的注入只用 `location.protocol === "http:"` 把关，而 dsh 页面同样是 `http://127.0.0.1`，挂上去会把 pi 的底部 dashboard 和 Tools chip 注入进来——那些 IPC 读的是 `~/.pi`，显示的数字与窗口内容毫无关系。dsh 也确实不需要外壳提供任何东西（它的目录选择器从自己的宿主进程拉起 Windows 原生 `IFileOpenDialog`）。
+2. **不写 `nativeTheme`**。`themeSource` 是 app 全局的，第二个窗口去驱动它会连带把 pi 窗口的原生标题栏刷成另一套配色。主题仍由主窗口独占（`features/native-theme.js`）。
+3. **自己一把锁**。dsh 的运行时目录与 pi 的相互独立，更新/自愈各自串行，互不阻塞。
+4. **版本钉死，且没有自动更新**。`runtime-seed-dsh/package.json` 写的是精确版本而非 `^`：dsh 处于 developer preview，README 明说 rc 之间可能不兼容。pi-web 那套「启动后自动静默检查」**没有**接到 dsh 上，只有菜单 `检查 DeepSeek Harness 更新…` 会去查、并在确认后才装。
+
+> `updater.isNewer()` 原先在第一个 `-` 处截断版本号，`0.1.0-rc.5` 与 `0.1.0-rc.6` 会被判为相等。这对只发正式版的 pi-web 无害，但会让 dsh **永远检查不到更新**（它至今全部版本都是 `0.1.0-rc.N`）。现已改为完整的 semver 预发布比较，回归用例见 `npm run test:guard` 的 `[9]`。
+
+### 从 Pi 导入模型配置
+
+菜单 `App → 从 Pi 导入模型配置…`。可行的原因是 dsh 的主力适配器 `@deepseek-ai/dsh-llm-pi-ai` 依赖 **`@earendil-works/pi-ai`**——和 pi 是同一个模型层库，字段语义一一对应。
+
+映射：`baseUrl → baseURL`、`thinkingLevelMap → reasoningEfforts`、`api`/`input`/`contextWindow`/`maxTokens` 同名，写进 `$DSH_HOME/settings.yaml` 的 `llm-pi-ai.providers`（其余段落原样保留，改写前自动备份成 `settings.yaml.bak-<时间戳>`）。
+
+**密钥不落 dsh 的盘**：settings 里只写 `apiKeyEnv: PI_DSH_KEY_<PROVIDER>`，真正的 key 在每次启动 dsh 时从 pi 的 `models.json` 现读、经子进程环境注入——dsh 的 credentials-local 把「继承的进程环境」排在自己的托管 store 之上，所以生效且不会写进 `$DSH_HOME/.credentials.yaml`。在 pi 里轮换密钥后无需重新导入。
+
+三类东西**导不过去**，导入前的确认框会逐条列出：
+
+- `cost` 定价信息——dsh 的 `PiAiModelProfile` 没有这个字段。
+- `compat.supportsDeveloperRole` / `supportsStore` / `requiresReasoningContentOnAssistantMessages`——dsh 只暴露 `thinkingFormat` 和 `supportsReasoningEffort`，其余回退到 pi-ai 按 baseURL 的自动探测，私有网关有猜错的可能。
+- `auth.json` 里的**目录型**提供方凭据（如 deepseek）——dsh 自带原生 DeepSeek 适配器，且给目录里没有的 id 造一条无 `api`/`baseURL` 的路由会让 dsh 直接拒绝配置、连启动都起不来。这类只做提示，请在 dsh 的设置→模型里直接填。
+
+> 另外 pi 用 `null` 表示"该思考档位不支持"，而 dsh 认为「声明了就是支持」且除 `off` 外必须给出线上拼写。导入时会把这些 `null` 档位**丢掉**而不是照搬——照搬会让整条路由被拒。
 
 ## 内置的扩展与技能
 
@@ -200,9 +246,13 @@ cd ..
 # 2b. 默认扩展的共享依赖(10 个 .ts 扩展源码已入库;此步只装它们的 node_modules)
 npm run seed:extensions
 
-# 3. 内置 Node 运行时(win-x64)
-#    下载 node-v22.12.0-win-x64.zip 解压为 vendor/node(含 node.exe + npm)
-#    例:https://registry.npmmirror.com/-/binary/node/v22.12.0/node-v22.12.0-win-x64.zip
+# 2c. DeepSeek Harness 运行时种子(~330MB,首次约 4~10 分钟) —— 装 package.json 里钉死的版本
+npm run seed:dsh
+
+# 3. 内置 Node 运行时(win-x64) —— 全自动
+#    版本下限 22.19 由脚本强制:dsh 会 import node:zlib 的 createZstdDecompress(22.15+)
+#    和 node:module 的 stripTypeScriptTypes(22.13+),旧版直接启动失败
+npm run seed:node
 
 # 4. 内置 Python(win-x64,ppt-master 依赖预装,~340MB) —— 全自动
 npm run seed:python
@@ -224,6 +274,8 @@ npm start
 - `PI_WEB_REGISTRY` —— 自更新使用的 npm registry（默认 `https://registry.npmmirror.com`）。
 - `PI_WEB_AUTO_UPDATE_CHECK=0` —— 关闭启动后的自动检查更新。
 - `PI_CODING_AGENT_DIR` —— 指定 pi 会话数据目录（默认 `~/.pi/agent`）。
+- `PI_DESKTOP_DSH_HOME` —— 指定 DeepSeek Harness 的 `$DSH_HOME`（默认 `DSH_HOME`，再默认 `~/.dsh`）。
+- `PI_DESKTOP_LAUNCH=pi|dsh|ask` —— 跳过（或强制显示）启动选择器。
 
 **开发默认扩展**：改 `extensions-seed/*.ts` 后 `npm start`。注意扩展同步现在是**非破坏性**的——只有 `~/.pi/agent/extensions/` 里那份仍与上次部署时一模一样（你没手改过）才会被刷新；否则你的版本被保留，只在「扩展管理」里标「有新版可用」。**开发时更省事的做法**：直接在 `~/.pi/agent/extensions/` 里改（不会再被启动覆盖了），改完再拷回 `extensions-seed/` 入库；或者在扩展管理里点「恢复内置版本」强制拉取仓库版（会先备份你的改动）。
 新增一个扩展：把 `.ts` 放进 `extensions-seed/` **并在 `extensions-seed/manifest.json` 里登记**（未登记的文件不会被部署，也不出现在选择器里）；`default: true` 的新扩展会在用户升级后自动装上。新增/变更 npm 依赖则改 `extensions-seed/package.json` + 在 manifest 对应条目的 `deps` 里声明，然后跑 `npm run seed:extensions`。
@@ -231,7 +283,7 @@ npm start
 
 ## 打包安装程序
 
-确保 `build/icon.ico` 存在，且 `vendor/node`、`vendor/python`（`npm run seed:python`）、`runtime-seed`、`extensions-seed`（其 `node_modules` 跑 `npm run seed:extensions` 准备）已就绪，然后：
+确保 `build/icon.ico` 存在，且 `vendor/node`（`npm run seed:node`）、`vendor/python`（`npm run seed:python`）、`runtime-seed`、`runtime-seed-dsh`（`npm run seed:dsh`）、`extensions-seed`（其 `node_modules` 跑 `npm run seed:extensions` 准备）已就绪，然后：
 
 ```bash
 npm run dist        # 生成 dist/Pi Agent Setup x.x.x.exe (NSIS)

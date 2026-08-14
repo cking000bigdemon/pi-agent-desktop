@@ -37,6 +37,21 @@ extraResources:
       - "**/*"
       - "!**/*.map"
       - "!**/.cache/**"
+  # DeepSeek Harness runtime seed (npm prod install of @deepseek-ai/dsh) ->
+  # resources/runtime-seed-dsh. Started ON DEMAND by electron/features/dsh.js,
+  # never at boot. Prebuilt native addons for OTHER platforms are dropped: the
+  # installer is win-x64 only and node-pty alone ships four foreign copies.
+  - from: runtime-seed-dsh
+    to: runtime-seed-dsh
+    filter:
+      - "**/*"
+      - "!**/*.map"
+      - "!**/.cache/**"
+      - "!**/prebuilds/darwin-*/**"
+      - "!**/prebuilds/linux-*/**"
+      - "!**/prebuilds/android-*/**"
+      - "!**/prebuilds/win32-arm64/**"
+      - "!**/prebuilds/win32-ia32/**"
   # Bundled pi extensions (single-file .ts + manifest.json + shared deps) ->
   # resources/extensions-seed. manifest.json catalogues the set; the first-run
   # picker lets the user choose which ones get deployed into
