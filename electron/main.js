@@ -23,6 +23,16 @@
  *    can never run at the same time.
  *  - The Next.js server is launched hidden (no console window) on a random
  *    127.0.0.1 port and shown in a native window.
+ *  - A SECOND runtime — @deepseek-ai/dsh — ships the same way but starts only
+ *    when the user opens it (App → DeepSeek Harness). Everything about it
+ *    lives in features/dsh.js, which borrows the helpers below rather than
+ *    duplicating them; this file only injects that context and adds the menu
+ *    entries. See that module's header for why its window gets no preload.
+ *  - Because there are now two of them, a launch STARTS with a chooser
+ *    (launcher.html) unless a default is remembered. That has to come before
+ *    any runtime work: a launch destined for dsh must not first seed, verify
+ *    and start pi-web. bootPi() therefore holds what used to be boot()'s body,
+ *    and boot() only decides.
  */
 
 const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require("electron");
@@ -39,6 +49,7 @@ const toolsFeature = require("./features/tools");
 const directoryPicker = require("./features/directory-picker");
 const extensionsManager = require("./features/extensions-manager");
 const nativeThemeSync = require("./features/native-theme");
+const dsh = require("./features/dsh");
 
 const isWindows = process.platform === "win32";
 const REGISTRY = process.env.PI_WEB_REGISTRY || "https://registry.npmmirror.com";
@@ -1225,7 +1236,133 @@ async function showError(err) {
     .catch(() => {});
 }
 
+// ---------------------------------------------------------------------------
+// Startup launcher — which runtime does this launch open?
+// ---------------------------------------------------------------------------
+// The choice comes FIRST, before any pi runtime work, because that is the whole
+// point: a launch that ends up in dsh must not pay for seeding, verifying and
+// starting pi-web on the way there.
+let launcherWin = null;
+// Set while a chosen runtime is starting but its window may not exist yet, so
+// closing the launcher can never look like "the last window closed → quit".
+let launchInProgress = false;
+
+function launchPrefPath() {
+  return path.join(app.getPath("userData"), "launch-preference.json");
+}
+
+/** Remembered launch target, or null to ask. Unreadable/unknown values ask. */
+function readLaunchPref() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(launchPrefPath(), "utf8").replace(/^﻿/, ""));
+    return raw.target === "pi" || raw.target === "dsh" ? raw.target : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLaunchPref(target) {
+  try {
+    if (target === null) fs.rmSync(launchPrefPath(), { force: true });
+    else fs.writeFileSync(launchPrefPath(), JSON.stringify({ target, savedAt: new Date().toISOString() }, null, 2));
+    dbg(`launch preference -> ${target === null ? "ask every time" : target}`);
+  } catch (e) {
+    dbg(`could not persist launch preference: ${(e && e.message) || e}`);
+  }
+}
+
+function openLauncher() {
+  launcherWin = new BrowserWindow({
+    width: 760,
+    height: 460,
+    resizable: false,
+    backgroundColor: "#0A0A0A",
+    autoHideMenuBar: true,
+    title: "Pi Agent",
+    icon: path.join(__dirname, "..", "build", "icon.png"),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, "launcher-preload.js"),
+    },
+  });
+  launcherWin.loadFile(path.join(__dirname, "launcher.html"));
+  // Keep the OS window/taskbar title as the app name, like the main window.
+  launcherWin.on("page-title-updated", (e) => e.preventDefault());
+  launcherWin.on("closed", () => {
+    launcherWin = null;
+  });
+}
+
+function closeLauncher() {
+  if (launcherWin && !launcherWin.isDestroyed()) launcherWin.close();
+  launcherWin = null;
+}
+
+ipcMain.handle("pi-web-desktop:launch-info", () => {
+  // Best-effort: a runtime that has not been seeded yet simply shows no version.
+  let piVersion = null;
+  try {
+    piVersion = updater.getInstalledVersion(runtimeDir());
+  } catch {
+    /* ignore */
+  }
+  let dshVersion = null;
+  try {
+    dshVersion = dsh.installedVersion();
+  } catch {
+    /* ignore */
+  }
+  return { piVersion, dshVersion };
+});
+
+ipcMain.on("pi-web-desktop:launch-choose", (_event, target, remember) => {
+  const pick = target === "dsh" ? "dsh" : "pi";
+  dbg(`launcher: chose ${pick}${remember ? " (remembered)" : ""}`);
+  if (remember) {
+    writeLaunchPref(pick);
+    Menu.setApplicationMenu(buildMenu()); // reflect the new default in the radio group
+  }
+  launchInProgress = true;
+  // Both entry points create their window synchronously before their first
+  // await, so the launcher can go away immediately without a windowless gap.
+  const started = pick === "dsh" ? dsh.open() : bootPi();
+  closeLauncher();
+  started
+    .catch((e) => dbg(`launch ${pick} failed: ${(e && e.stack) || e}`))
+    .finally(() => {
+      launchInProgress = false;
+    });
+});
+
+ipcMain.on("pi-web-desktop:launch-cancel", () => {
+  dbg("launcher dismissed — nothing was started, quitting");
+  app.isQuitting = true;
+  closeLauncher();
+  app.quit();
+});
+
+/**
+ * Decide what this launch opens: a remembered default, an explicit
+ * PI_DESKTOP_LAUNCH override (`pi` / `dsh` / `ask`, used by tests and shortcuts),
+ * or the launcher window.
+ */
 async function boot() {
+  const override = (process.env.PI_DESKTOP_LAUNCH || "").toLowerCase();
+  const remembered = readLaunchPref();
+  const target = override === "pi" || override === "dsh" ? override : override === "ask" ? null : remembered;
+  dbg(`boot: override=${override || "(none)"} remembered=${remembered || "(none)"} -> ${target || "ask"}`);
+  if (target === "dsh") return dsh.open();
+  if (target === "pi") return bootPi();
+  openLauncher();
+}
+
+async function bootPi() {
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore();
+    win.focus();
+    return;
+  }
   dbg(`boot start; isPackaged=${app.isPackaged} userData=${app.getPath("userData")}`);
   createWindow();
   try {
@@ -1295,6 +1432,24 @@ if (!gotLock) {
     }
   });
   app.whenReady().then(() => {
+    // The dsh feature owns its own runtime dir, server, window and lock; it
+    // borrows this file's path/probe helpers rather than duplicating them, and
+    // nothing here starts until the user asks for it (App → DeepSeek Harness).
+    dsh.configure({
+      dbg,
+      registry: REGISTRY,
+      debugLogPath: () => DEBUG_LOG,
+      resourcesBase,
+      userDataDir: () => app.getPath("userData"),
+      bundledNodeExe,
+      bundledNodeDir,
+      bundledNpmCli,
+      bundledPythonPathDirs,
+      isWritable,
+      copyRuntime,
+      getFreePort,
+      waitForServer,
+    });
     Menu.setApplicationMenu(buildMenu());
     boot();
     app.on("activate", () => {
@@ -1303,18 +1458,40 @@ if (!gotLock) {
   });
 }
 
-app.on("window-all-closed", () => {
-  app.isQuitting = true;
+function killAllServers() {
   killServer();
+  // dsh normally dies with its own window; this covers "quit while it is open".
+  try {
+    dsh.stop();
+  } catch {
+    /* never let a dsh failure block the shell from quitting */
+  }
+}
+
+app.on("window-all-closed", () => {
+  // The launcher closes a moment before (or after) the chosen runtime's window
+  // appears; quitting in that gap would kill the launch the user just asked for.
+  if (launchInProgress) return;
+  app.isQuitting = true;
+  killAllServers();
   app.quit();
 });
 app.on("before-quit", () => {
   app.isQuitting = true;
-  killServer();
+  killAllServers();
 });
-process.on("exit", killServer);
+process.on("exit", killAllServers);
+
+/** Change the remembered launch target and re-check the radio group. */
+function setLaunchPref(target) {
+  writeLaunchPref(target);
+  Menu.setApplicationMenu(buildMenu());
+}
 
 function buildMenu() {
+  // Read once per build so the radio group shows what is actually on disk —
+  // including a change made from the launcher's "记住选择" checkbox.
+  const currentPref = readLaunchPref();
   const template = [
     {
       label: "App",
@@ -1327,6 +1504,47 @@ function buildMenu() {
           label: "扩展管理…",
           click: () => manageExtensions(),
         },
+        { type: "separator" },
+        {
+          label: "Pi Agent",
+          click: () => bootPi().catch((e) => dialog.showErrorBox("Pi Agent 启动失败", String(e))),
+        },
+        {
+          label: "DeepSeek Harness",
+          click: () => dsh.open().catch((e) => dialog.showErrorBox("DeepSeek Harness 启动失败", String(e))),
+        },
+        {
+          label: "启动时打开",
+          submenu: [
+            {
+              label: "每次询问",
+              type: "radio",
+              checked: currentPref === null,
+              click: () => setLaunchPref(null),
+            },
+            {
+              label: "Pi Agent",
+              type: "radio",
+              checked: currentPref === "pi",
+              click: () => setLaunchPref("pi"),
+            },
+            {
+              label: "DeepSeek Harness",
+              type: "radio",
+              checked: currentPref === "dsh",
+              click: () => setLaunchPref("dsh"),
+            },
+          ],
+        },
+        {
+          label: "从 Pi 导入模型配置…",
+          click: () => dsh.importPiModels(),
+        },
+        {
+          label: "检查 DeepSeek Harness 更新…",
+          click: () => dsh.checkUpdate(true),
+        },
+        { type: "separator" },
         {
           label: "重新加载",
           accelerator: "CmdOrCtrl+R",
