@@ -1,11 +1,16 @@
 "use strict";
 
 /**
- * Runtime self-updater for the bundled pi-web.
+ * Runtime self-updater for the bundled npm runtimes.
  *
  * pi-web (and its dependency @earendil-works/pi-coding-agent) lives in a
  * writable per-user runtime dir, installed from the published npm package which
  * ships a prebuilt `.next` — so updating is a plain `npm install`, no compile.
+ *
+ * Every entry point takes the package name as an argument (defaulting to
+ * pi-web's, which is what every pre-existing caller means) because the shell
+ * now ships a SECOND runtime — @deepseek-ai/dsh under runtime-seed-dsh — that
+ * updates through the exact same npm + staging + swap path.
  *
  * All npm calls go through the BUNDLED node + npm so the target machine needs
  * nothing pre-installed.
@@ -28,9 +33,10 @@ const PKG = "@agegr/pi-web";
 // both packages the user cares about.
 const AGENT_PKG = "@earendil-works/pi-coding-agent";
 
-function getInstalledVersion(runtimeDir) {
+/** Installed version of `pkg` inside a runtime dir, or null when absent/unreadable. */
+function getInstalledVersion(runtimeDir, pkg = PKG) {
   try {
-    const p = path.join(runtimeDir, "node_modules", "@agegr", "pi-web", "package.json");
+    const p = path.join(runtimeDir, "node_modules", ...pkg.split("/"), "package.json");
     return JSON.parse(fs.readFileSync(p, "utf8")).version;
   } catch {
     return null;
@@ -86,15 +92,15 @@ function runNpm(ctx, args, opts = {}) {
   });
 }
 
-async function getLatestVersion(ctx) {
-  const { stdout } = await runNpm(ctx, ["view", PKG, "version"], { timeout: 60000 });
+async function getLatestVersion(ctx, pkg = PKG) {
+  const { stdout } = await runNpm(ctx, ["view", pkg, "version"], { timeout: 60000 });
   return stdout.trim();
 }
 
-async function installLatest(ctx, onProgress) {
+async function installLatest(ctx, onProgress, pkg = PKG) {
   return runNpm(
     ctx,
-    ["install", `${PKG}@latest`, "--omit=dev", "--no-audit", "--no-fund"],
+    ["install", `${pkg}@latest`, "--omit=dev", "--no-audit", "--no-fund"],
     { timeout: 600000, onProgress }
   );
 }
@@ -138,20 +144,67 @@ async function installInto(ctx, dir, spec, onProgress) {
   return runNpm(ctx, ["install", ...common], opts);
 }
 
-/** Compare dotted versions (x.y.z[-tag]); returns true if `latest` > `installed`. */
+/**
+ * Split `x.y.z[-pre][+build]` into its release numbers and prerelease
+ * identifiers. Build metadata is dropped: semver says it never affects
+ * precedence.
+ */
+function parseVersion(v) {
+  const [core, ...preParts] = String(v).trim().split("+")[0].split("-");
+  return {
+    release: core.split(".").map((n) => parseInt(n, 10) || 0),
+    // Rejoining on "-" keeps a tag like `rc.1-hotfix` intact as one string
+    // before it is split on "." into identifiers.
+    pre: preParts.length ? preParts.join("-").split(".") : [],
+  };
+}
+
+/**
+ * Compare two prerelease identifier lists by semver §11.4.
+ *
+ * Numeric identifiers compare numerically, alphanumerics compare in ASCII
+ * order, numeric always sorts BELOW alphanumeric, and when one list is a
+ * prefix of the other the longer one wins.
+ */
+function comparePre(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] === undefined) return -1;
+    if (b[i] === undefined) return 1;
+    if (a[i] === b[i]) continue;
+    const na = /^\d+$/.test(a[i]);
+    const nb = /^\d+$/.test(b[i]);
+    if (na && nb) return Number(a[i]) < Number(b[i]) ? -1 : 1;
+    if (na !== nb) return na ? -1 : 1;
+    return a[i] < b[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Compare semver versions; returns true if `latest` > `installed`.
+ *
+ * PRERELEASES ARE SIGNIFICANT. The old implementation truncated at the first
+ * "-", which made `0.1.0-rc.5` and `0.1.0-rc.6` compare EQUAL — harmless while
+ * the only tracked package (pi-web) shipped plain releases, but it would have
+ * frozen @deepseek-ai/dsh forever: its entire published history so far is
+ * `0.1.0-rc.N`, so every check would have reported "already up to date".
+ */
 function isNewer(latest, installed) {
   if (!installed) return true;
   if (!latest) return false;
-  const norm = (v) => v.split("-")[0].split(".").map((n) => parseInt(n, 10) || 0);
-  const a = norm(latest);
-  const b = norm(installed);
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const x = a[i] || 0;
-    const y = b[i] || 0;
+  const a = parseVersion(latest);
+  const b = parseVersion(installed);
+  for (let i = 0; i < Math.max(a.release.length, b.release.length); i++) {
+    const x = a.release[i] || 0;
+    const y = b.release[i] || 0;
     if (x > y) return true;
     if (x < y) return false;
   }
-  return false;
+  // Same release numbers: a version WITHOUT a prerelease outranks one with.
+  if (!a.pre.length && !b.pre.length) return false;
+  if (!a.pre.length) return true;
+  if (!b.pre.length) return false;
+  return comparePre(a.pre, b.pre) > 0;
 }
 
 module.exports = {
@@ -163,4 +216,7 @@ module.exports = {
   installLatest,
   installInto,
   isNewer,
+  // exported for tests
+  parseVersion,
+  comparePre,
 };

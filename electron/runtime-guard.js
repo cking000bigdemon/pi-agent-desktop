@@ -247,6 +247,31 @@ function findNpmScratchDirs(nodeModulesDir) {
 }
 
 /**
+ * Landmark files whose absence means the tree is not a usable runtime, keyed
+ * by the runtime they describe. Paths are relative to `node_modules`.
+ *
+ * dsh's list is deliberately short: unlike pi-web (whose prebuilt `.next` is
+ * the thing most likely to arrive half-written) dsh is plain JS plus prebuilt
+ * native addons, and the native probe below covers those far better than any
+ * file-existence check could. The frontend `dist` is listed because a dsh
+ * install without it starts and then serves 404s — a failure that would
+ * otherwise reach the user as a blank window.
+ */
+const PI_WEB_REQUIRED_FILES = [
+  { rel: ["next", "dist", "bin", "next"], label: "next CLI" },
+  { rel: ["@agegr", "pi-web", "package.json"], label: "pi-web package" },
+  { rel: ["@agegr", "pi-web", ".next", "BUILD_ID"], label: "pi-web prebuilt .next" },
+  { rel: ["react", "package.json"], label: "react" },
+];
+
+const DSH_REQUIRED_FILES = [
+  { rel: ["@deepseek-ai", "dsh", "package.json"], label: "dsh package" },
+  { rel: ["@deepseek-ai", "dsh", "lib", "bin.js"], label: "dsh CLI entry" },
+  { rel: ["@deepseek-ai", "dsh-web-app", "cordis.patch.yml"], label: "dsh web bundle layer" },
+  { rel: ["@deepseek-ai", "dsh-web-frontend", "dist", "index.html"], label: "dsh prebuilt frontend" },
+];
+
+/**
  * Verify a runtime tree — used BOTH as the boot preflight and as the acceptance
  * test for a freshly staged install. Same checks in both roles, so anything
  * that would fail at boot is rejected before it can be swapped in.
@@ -262,13 +287,13 @@ async function verifyRuntime(ctx, dir) {
   const nm = path.join(dir, "node_modules");
 
   // --- structural checks (cheap, catch a wholesale-missing install) ---
-  const required = [
-    [path.join(nm, "next", "dist", "bin", "next"), "next CLI"],
-    [path.join(nm, "@agegr", "pi-web", "package.json"), "pi-web package"],
-    [path.join(nm, "@agegr", "pi-web", ".next", "BUILD_ID"), "pi-web prebuilt .next"],
-    [path.join(nm, "react", "package.json"), "react"],
-  ];
-  for (const [p, label] of required) {
+  // The list is per-runtime: this guard now serves both the pi-web runtime and
+  // the dsh one, which share every other mechanism but obviously not their
+  // landmark files. `ctx.requiredFiles` overrides; the default is pi-web's, so
+  // callers written before the second runtime existed keep their behaviour.
+  const required = ctx.requiredFiles || PI_WEB_REQUIRED_FILES;
+  for (const { rel, label } of required) {
+    const p = path.join(nm, ...rel);
     if (!exists(p)) failures.push({ kind: "missing", label, detail: p });
   }
 
@@ -527,6 +552,8 @@ async function provisionRuntime(ctx, opts = {}) {
 }
 
 module.exports = {
+  PI_WEB_REQUIRED_FILES,
+  DSH_REQUIRED_FILES,
   stagingDir,
   trashDir,
   journalPath,
