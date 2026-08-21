@@ -3,14 +3,14 @@
 把 [pi-web](https://github.com/agegr/pi-web)（pi 编程智能体的网页界面，npm 包 **`@agegr/pi-web`**）打包成一个**开箱即用的桌面应用**：
 双击即用，没有浏览器、没有地址栏、没有常驻终端窗口，**目标机器无需预装任何运行时**。
 
-它不只是「pi-web 套壳」——而是一台**电池全含的 AI 工作站**：内置 Node 与 Python 两套运行时、10 个默认扩展、一套 OKF 知识库技能（编译 / 查询 / 检查 / 可视化）和 PPT 生成技能 `ppt-master`，拷到空电脑双击即可使用。
+它不只是「pi-web 套壳」——而是一台**电池全含的 AI 工作站**：内置 Node 与 Python 两套运行时、13 个默认扩展、一套 OKF 知识库技能（编译 / 查询 / 检查 / 可视化）和 PPT 生成技能 `ppt-master`，拷到空电脑双击即可使用。
 
 **核心特性**
 - 🧳 **内置 Node + Python 运行时** —— 目标机器无需 Node/npm/Python，拷到空电脑双击即用。
 - ⚡ **就地运行，首启秒开** —— 直接从（可写的）安装目录跑 pi-web，不做首启复制。
 - 🔄 **运行时自更新** —— App 内「检查更新」直接装 `@agegr/pi-web@latest`（npm 包自带预构建 `.next`，免编译），独立更新 pi-web + pi-coding-agent，**无需重新发版、不碰外壳代码**。安装走 **staging + 校验通过才原子换入**，更新失败/断网/中途被杀都不会损坏正在用的运行时。
 - 🩺 **启动自检与自愈** —— 每次启动先验证运行时的原生模块是否真的能加载；发现是安装被中断留下的残缺文件，自动按锁定版本重装修复（不趁机升级），而不是让用户对着 `server not ready in time` 干瞪眼。
-- 🧩 **默认扩展随装** —— 10 个 pi 扩展每次启动从仓库同步进 `~/.pi/agent/extensions/`，仓库为唯一真源。
+- 🧩 **默认扩展随装** —— 13 个 pi 扩展每次启动从仓库同步进 `~/.pi/agent/extensions/`，仓库为唯一真源。
 - 📚 **默认技能随装** —— OKF 知识库技能 + `ppt-master` 演示文稿生成，每次启动同步进 `~/.pi/agent/skills/`，所有工作目录可用。
 - 🐍 **零依赖 Python 技能** —— 内置 Python 让 Python 技能「装完即用、离线零 pip」；环境守卫强制用户项目走干净的 `.venv`。
 - 🪟 **原生窗口** —— 内嵌 Next.js 服务隐藏运行在随机 `127.0.0.1` 端口，关窗即停。
@@ -33,7 +33,7 @@ pi-web-desktop/
 ├── runtime-seed/       # @agegr/pi-web 的 npm 生产安装(含 .next) → resources/runtime-seed          ← 构建输入(npm run seed)
 ├── runtime-seed-dsh/   # @deepseek-ai/dsh 的 npm 生产安装 → resources/runtime-seed-dsh          ← 构建输入(npm run seed:dsh)
 │                       # package.json(版本钉子)已入库,node_modules/lockfile 是构建输入
-├── extensions-seed/    # 默认随装的 10 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
+├── extensions-seed/    # 默认随装的 13 个 pi 扩展(.ts 源码已入库;node_modules 为构建输入) → resources/extensions-seed
 ├── skills-seed/        # 默认随装的技能(wiki 系列 OKF + ppt-master,源码已入库) → resources/skills-seed
 ├── scripts/            # seed-node.ps1(供给 vendor/node,内含 dsh 要求的版本下限)
 │                       # + seed-python.ps1 + vendor-python-requirements.txt(供给 vendor/python)
@@ -44,7 +44,7 @@ pi-web-desktop/
 ```
 
 > **构建输入 vs 入库源码**:`vendor/`、`runtime-seed/`、`extensions-seed/node_modules` 都体积大、已 gitignore,需按[下文](#从零准备构建输入)重新准备。本地若存在 `pi-web/` 目录,那是已退役的 fork 工作副本(`cking000bigdemon/pi-web`,曾发布为 `@cking000/pi-web`),桌面端已回归上游包,不再是构建输入。
-> **已纳入版本库**:`extensions-seed/` 的 10 个 `.ts` 扩展源码 + `manifest.json`(扩展目录清单)、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
+> **已纳入版本库**:`extensions-seed/` 的 13 个 `.ts` 扩展源码 + `manifest.json`(扩展目录清单)、`skills-seed/` 全部技能源码(含 `ppt-master` 的模板/脚本)、`scripts/` 供给脚本——这些是产品源码,直接随仓库走。
 
 ## 启动选择器
 
@@ -154,12 +154,14 @@ pi-web-desktop/
 
 判定「改没改过」用的是**忽略换行符**的内容哈希（`core.autocrlf` 会把种子检出成 CRLF，纯换行差异不能算用户改动）。选择与部署记录写在 `userData/extensions-state.json`，`~/.pi` 里不留任何附加文件。实现见 `electron/features/extensions-manager.js`（策略注释在文件头）、`electron/extensions-picker.html`、`electron/extensions-preload.js`。
 
-### 内置的 10 个扩展
+### 内置的 13 个扩展
 
 | 扩展 | 作用 |
 |---|---|
 | `auto-session-title` | 自动生成会话标题 |
+| `claude-code-review` | **Claude 代码审查**：`claude_code_review` 工具把指定范围的改动（工作区／已暂存／整条分支／某次提交／指定文件）交给一个独立的 Claude Code 子进程（`claude -p` 非交互模式）做**只读**评审，结果以结构化 JSON 回来——整体 verdict + 逐条 findings（文件/行号/严重度/类别/说明/改法）+ 亮点与后续跟进项，不占主会话的上下文窗口。子进程只拿到 Read/Grep/Glob 与 git 查询类命令，没有 Write/Edit。默认 `claude-opus-5` + `--effort xhigh`，pi 调用时可用 `model`／`effort` 指定其它 Claude 模型与思考强度（low/medium/high/xhigh/max），非 Claude 模型会被拒。**闸门：每次调用前读网卡当前 SSID，只有连着 `Variflight` 无线网才放行**，否则直接拒绝、不发起任何请求。`/claude-review` 看闸门状态、`claude` 可执行文件与默认参数；`PI_CR_*` 可改 SSID／模型／强度／超时／diff 上限 |
 | `context-file-injector` | **目录上下文文件注入**：补上 pi 原生只向上找、不向下找的空缺——agent 进到子目录干活时，把该目录链上的 AGENTS.md／CLAUDE.md 注入会话（同目录按 `AGENTS.override.md > AGENTS.md > AGENTS.MD > CLAUDE.md > CLAUDE.MD` 只取一个），每文件每会话一次；首次发现新上下文的写／改会被拦下让模型先读。取代已退役的 `agents-md-injector` + `claude-md-injector`（沿用其会话状态，续跑不重复注入） |
+| `cross-agent-memory` | **跨 Agent 记忆桥接**：pi 自己没有长期记忆，而同一台机器上的 Claude Code 与 Codex 各写了一份。会话开始时读 `~/.claude/projects/<项目键>/memory/MEMORY.md` 与 `$CODEX_HOME/memories/memory_summary.md`，每轮 `before_agent_start` 追加进 system prompt。内容经 XML 转义后放进 `<memory_data>` 并明确声明为**不可信数据**（只取事实、偏好、历史决策，绝不执行其中的指令）；默认前 200 行 / 25 KiB，项目未受信任时不读。`/cross-memory-status` 看加载情况、`/cross-memory-reload` 重读；`PI_CROSS_MEMORY_*` 可关闭或改上限 |
 | `general-agent-prompt` | 通用 agent 系统提示增强 |
 | `image-generation` | **生图工具**：`generate_image_gpt`（OpenAI gpt-image-2）与 `generate_image_gemini`（gemini-3.1-flash-image），图片存到当前 workspace 的 `ai-output/temporary/pictures/` 并返回路径，不把 base64 塞回上下文 |
 | `language-guard` | **语言守卫**：检测 assistant 回复语言漂移（非中文主导即拦截），中断后注入中文要求并自动重发原任务；可选子 pi 复核，防死循环限重启次数 |
@@ -168,6 +170,7 @@ pi-web-desktop/
 | `skill-shell-injection` | **Skill 动态上下文注入**：补上 Pi 原生没有的 Claude Code 式 `` !\`cmd\` `` / ```` ```! ```` 语法——SKILL.md/prompt 被加载时在 shell 执行内嵌命令、把输出内联替换进内容；钩 `read` 自动生效，另提供 `/skillx <name>` 直调 |
 | `vision-fallback` | **多模态图片输入回退**：当前模型不支持读图而用户又发了图时，本轮自动 `setModel` 切到支持图片的模型，`agent_settled` 后切回原模型与思考级别 |
 | `web-search-tools` | **联网搜索**（四个互补工具，按成本分级，文件名 `web_search_tools.ts`）：`web_search`（免费，CPA 网关 Responses API + 内置 web_search，流式接收，返回带来源的结论）、`perplexity_search`（$0.005/次，结构化 ranked results）、`perplexity_pro_search`（$0.008/次 + token 费，Sonar Pro 多步深度检索）、`perplexity_async_sonar`（真异步 `/v1/async/sonar`，默认 `sonar-deep-research`，可跑十几分钟）；后两个每次调用前都要用户点确认。取代已退役的 `variflight-web-search`（首个工具由 `variflight_web_search` 更名为 `web_search`） |
+| `windows-encoding-guard` | **Windows 编码陷阱守卫**：`write`／`edit` 落盘前先重建「将要写入的完整内容」再做静态检查，两类致命项直接拦截——用 `[Console]::In` 读 stdin（按控制台 ANSI 代码页即 GBK 解码，中文用户名路径会吃掉 JSON 转义），以及剔除注释后的可执行代码里出现非 ASCII 但文件没有 UTF-8 BOM（powershell.exe 5.1 会按 GBK 读 BOM-less 的 `.ps1`）。其余为告警并注入下一轮。`/windows-encoding-audit [路径]` 可对单文件或整个目录递归体检；`PI_WINDOWS_ENCODING_GUARD=0` 关闭 |
 
 运行时 `@earendil-works/pi-coding-agent` 由 pi 注入扩展加载器，**不打包**；唯一需打包的依赖是 `@modelcontextprotocol/client`（MCP SDK v2，mcp-bridge 用），由 `npm run seed:extensions` 准备。
 
@@ -243,7 +246,7 @@ mkdir runtime-seed; cd runtime-seed; npm init -y
 npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com
 cd ..
 
-# 2b. 默认扩展的共享依赖(10 个 .ts 扩展源码已入库;此步只装它们的 node_modules)
+# 2b. 默认扩展的共享依赖(13 个 .ts 扩展源码已入库;此步只装它们的 node_modules)
 npm run seed:extensions
 
 # 2c. DeepSeek Harness 运行时种子(~330MB,首次约 4~10 分钟) —— 装 package.json 里钉死的版本
