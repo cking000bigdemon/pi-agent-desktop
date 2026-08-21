@@ -119,6 +119,15 @@
       "deps": []
     },
     {
+      "id": "claude-code-review",
+      "file": "claude-code-review.ts",
+      "name": "Claude 代码审查",
+      "summary": "把代码 review 外包给独立的 Claude Code 子进程，返回结构化 JSON",
+      "description": "注册 claude_code_review 工具：把指定范围的改动（工作区／已暂存／整条分支／某次提交／指定文件）交给一个独立的 Claude Code 子进程（claude -p 非交互模式）做只读代码审查，评审结果以结构化 JSON 回给 pi——整体 verdict、逐条 findings（文件/行号/严重度/类别/说明/改法）、亮点与后续跟进项，不占用当前会话的上下文窗口。子进程带只读工具（Read/Grep/Glob + git 查询命令）自行补上下文，拿不到 Write/Edit。默认模型 claude-opus-5、思考强度 xhigh，pi 调用时可用 model / effort 参数指定其它 Claude 模型与强度（low/medium/high/xhigh/max），非 Claude 模型会被拒。安全约束：每次调用前先读网卡当前 SSID，只有连着 Variflight 无线网才放行，否则直接拒绝、不发起任何请求。/claude-review 查看闸门状态、claude 可执行文件与默认参数；PI_CR_* 环境变量可改 SSID／模型／强度／超时／diff 上限，或打开调用前确认框。",
+      "default": true,
+      "deps": []
+    },
+    {
       "id": "windows-encoding-guard",
       "file": "windows-encoding-guard.ts",
       "name": "Windows 编码陷阱守卫",
